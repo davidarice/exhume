@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>FinalCrackPro</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%236d4aff'/%3E%3Cg fill='%23ffffff' opacity='0.7'%3E%3Crect x='4.5' y='5' width='3' height='4.5' rx='1'/%3E%3Crect x='4.5' y='13.75' width='3' height='4.5' rx='1'/%3E%3Crect x='4.5' y='22.5' width='3' height='4.5' rx='1'/%3E%3Crect x='24.5' y='5' width='3' height='4.5' rx='1'/%3E%3Crect x='24.5' y='13.75' width='3' height='4.5' rx='1'/%3E%3Crect x='24.5' y='22.5' width='3' height='4.5' rx='1'/%3E%3C/g%3E%3Cpath d='M13 10.2v11.6l9.5-5.8z' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="site-header">
+      <p class="wordmark">
+        <svg class="wm-mark" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <g fill="currentColor" opacity="0.5">
+            <rect x="5" y="5.5" width="2.6" height="4" rx="1"/>
+            <rect x="5" y="14" width="2.6" height="4" rx="1"/>
+            <rect x="5" y="22.5" width="2.6" height="4" rx="1"/>
+            <rect x="24.4" y="5.5" width="2.6" height="4" rx="1"/>
+            <rect x="24.4" y="14" width="2.6" height="4" rx="1"/>
+            <rect x="24.4" y="22.5" width="2.6" height="4" rx="1"/>
+          </g>
+          <path d="M13 10.5v11l9-5.5z" fill="currentColor"/>
+        </svg>
+        <span>Final<strong>Crack</strong>Pro</span>
+      </p>
+      <p class="tagline">Open Final Cut Pro 7 projects. No Final Cut required.</p>
+    </header>
+
+    <main>
+      <p id="status" class="visually-hidden" role="status" aria-live="polite"></p>
+
+      <!-- 1. IDLE -->
+      <section id="state-idle" class="state" hidden>
+        <label id="dropzone" class="dropzone" for="file-input">
+          <svg class="dz-icon" width="44" height="44" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <g fill="currentColor" opacity="0.5">
+              <rect x="5" y="5.5" width="2.6" height="4" rx="1"/>
+              <rect x="5" y="14" width="2.6" height="4" rx="1"/>
+              <rect x="5" y="22.5" width="2.6" height="4" rx="1"/>
+              <rect x="24.4" y="5.5" width="2.6" height="4" rx="1"/>
+              <rect x="24.4" y="14" width="2.6" height="4" rx="1"/>
+              <rect x="24.4" y="22.5" width="2.6" height="4" rx="1"/>
+            </g>
+            <path d="M13 10.5v11l9-5.5z" fill="currentColor"/>
+          </svg>
+          <span class="dz-title">Drop your .fcp file</span>
+          <span class="dz-sub">or click to browse</span>
+          <input type="file" id="file-input" class="visually-hidden" accept=".fcp">
+        </label>
+      </section>
+
+      <!-- 2. UPLOADING -->
+      <section id="state-uploading" class="state panel" hidden>
+        <h2 class="state-title">Uploading <span id="upload-filename" class="filename"></span></h2>
+        <div id="upload-progress" class="progress" role="progressbar" aria-label="Upload progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="upload-bar" class="progress-fill"></div>
+        </div>
+        <p class="progress-label"><span id="upload-pct">0%</span></p>
+        <p id="upload-note" class="notice" hidden></p>
+      </section>
+
+      <!-- 3. PARSING -->
+      <section id="state-parsing" class="state panel" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <h2 class="state-title">Cracking open <span id="parsing-filename" class="filename"></span>&hellip;</h2>
+        <p class="muted"><span id="parsing-elapsed" class="tnum">0</span>s elapsed</p>
+      </section>
+
+      <!-- 4. READY -->
+      <section id="state-ready" class="state" hidden>
+        <p id="project-summary" class="summary"></p>
+        <div class="table-wrap">
+          <table id="seq-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input type="checkbox" id="select-all" aria-label="Select all sequences"></th>
+                <th class="col-name">Sequence</th>
+                <th class="col-num">fps</th>
+                <th class="col-num">Resolution</th>
+                <th class="col-num">Duration</th>
+              </tr>
+            </thead>
+            <tbody id="seq-tbody"></tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button id="convert-btn" class="btn primary" type="button" disabled>Select sequences to convert</button>
+        </div>
+      </section>
+
+      <!-- 5. CONVERTING -->
+      <section id="state-converting" class="state panel" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <h2 class="state-title">Converting to XML&hellip;</h2>
+        <div id="convert-progress" class="progress" role="progressbar" aria-label="Conversion progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="convert-bar" class="progress-fill"></div>
+        </div>
+        <p class="progress-label"><span id="convert-label" class="tnum">0 of 0 converted</span></p>
+      </section>
+
+      <!-- 6. DONE -->
+      <section id="state-done" class="state panel" hidden>
+        <svg class="done-icon" width="36" height="36" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <circle cx="16" cy="16" r="14.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M9.5 16.5l4.5 4.5 8.5-9" fill="none" stroke="currentColor" stroke-width="2.4"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h2 class="state-title">Conversion complete</h2>
+        <p id="done-summary" class="muted"></p>
+        <p class="actions"><a id="download-all" class="btn primary" href="#">Download all (.zip)</a></p>
+        <ul id="done-files" class="file-list"></ul>
+        <p><button id="back-btn" class="linklike" type="button">Back to sequences</button></p>
+        <p><button id="reset-btn" class="linklike" type="button">Convert another project</button></p>
+      </section>
+
+      <!-- 7. ERROR -->
+      <section id="state-error" class="state panel panel-error" hidden>
+        <h2 class="state-title">Something went wrong</h2>
+        <p id="error-message" class="error-text"></p>
+        <p class="actions"><button id="retry-btn" class="btn primary" type="button">Try again</button></p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>FinalCrackPro &mdash; reverse-engineered .fcp &rarr; xmeml converter. Files are processed locally.</p>
+    </footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
