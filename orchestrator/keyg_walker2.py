@@ -236,6 +236,9 @@ FILESPEC_MAX_LEN = 0x40000
 SLOT_MAX_ID = 0xFFFFF
 SLOT_MAX_COUNT = 0x8000
 SLOT_TAGS = {0x01, 0x03, 0x04, 0x05, 0x07, 0x0b, 0x1e, 0x1f, 0x23, 0x18, 0x21, 0x00}
+# anika-2007 inline masterClip/captureSource class bytes (schema id at head off+5):
+# 0x17 reel/capture-source master, 0x37 KGScriptParser, 0x66 generator master.
+MASTER_CLS = frozenset((0x17, 0x37, 0x66))
 # merge toggles (each gap-gated separately)
 F_CTAGS_SIZES = True     # ctags element sizes (02:5 08:1 0f:9 12:5) over dictb's (4/0/8/4)
 F_0C_TAIL = True         # 0x0c: 12B when second flag==0 (tail 00), else 11B
@@ -868,6 +871,50 @@ def _value(d: bytes, p: int, ev: list, hi: int) -> int:
             ln = _u32(d, p + 1); ev.append((p0, "STRINL", d[p + 5:p + 5 + ln].decode("utf-8", "replace"))); return p + 5 + ln
         ev.append((p0, "STRREF", _u32(d, p + 1))); return p + 5
     if t == 0x00:
+        # anika-2007 inline masterClip/captureSource object (the LE side of
+        # keyg_swab's MASTEROBJ; ZERO Intel sites — this shape only exists in the
+        # transcoded PPC-2007 file).  Head after the swab: [00 00 00 00][a=0]
+        # [class byte in MASTER_CLS][u32le 0x1f schema-tag][01 01][u32le namelen]
+        # [ascii name].  Its body is a self-terminating keyed-metadata record
+        # (reel GUID refs, timecode, capture settings) that the grouper isolates
+        # and closes at the enclosing clip's next bare clipitem head.  Surface the
+        # head and skip past the name to the body's first member.  Gated on the
+        # 0x1f schema word + class set + 01 01 + printable name: matches no normal
+        # tag-0x00 value (all of which carry pad3 == 0 at off+6).
+        if a == 0 and d[p0 + 5] in MASTER_CLS and _u32(d, p0 + 6) == 0x1f \
+                and d[p0 + 10:p0 + 12] == b"\x01\x01":
+            nl = _u32(d, p0 + 12)
+            if 1 <= nl <= 64 and p0 + 16 + nl <= hi \
+                    and all(0x20 <= c < 0x7f for c in d[p0 + 16:p0 + 16 + nl]):
+                ev.append((p0, "MASTEROBJ", d[p0 + 16:p0 + 16 + nl].decode("utf-8", "replace")))
+                return p0 + 16 + nl
+        # anika-dialect inline-class-name typed object: a keyed value whose tag
+        # is 0x00 but whose would-be pad3 is instead [u8 L][L ascii classname]
+        # (masterClips @0x5fe in anika's logo generator).  Every normal tag-0x00
+        # value (OBJINL/OBJREF/OBJEMPTY/LEAF) has pad3 == 0, so a printable
+        # length here is the discriminator and matches no other form.  The
+        # walker used to read the class name byte-by-byte as RAW, leaving the
+        # object's self-terminating members (isMaster/itemspec/markers/...) to
+        # bubble as phantom entries of the enclosing counted FxPlug generator
+        # DICT(20) — truncating it, and with it the whole timeline.  Surface the
+        # value as an empty object and skip the class-name preamble (its
+        # secondary "orphan" tag included) to the first clean keyed member so
+        # the enclosing dict counts this as exactly one entry.  palastin's
+        # masterClips/orphan form is DEF-keyed / OTAGOBJ (pad3 == 0) and never
+        # reaches this branch.
+        Lc = d[p0 + 1]
+        if 1 <= Lc <= 40 and p0 + 2 + Lc <= hi \
+                and all(0x20 <= c < 0x7f for c in d[p0 + 2:p0 + 2 + Lc]):
+            for s in range(p0 + 2 + Lc, min(p0 + 2 + Lc + 0x40, hi)):
+                Lm = d[s]
+                if not (1 <= Lm <= 40) or s + 1 + Lm >= hi:
+                    continue
+                if not all(0x20 <= c < 0x7f for c in d[s + 1:s + 1 + Lm]):
+                    continue
+                vt = d[s + 1 + Lm]
+                if vt in SLOT_TAGS or vt in FIXED_TAGS \
+                        or vt in (0x0c, 0x20, 0x10, 0x16, 0x06):
+                    ev.append((p0, "OBJEMPTY")); return s
         # v0x13 (PPC 2006 dialect) keyed-OBJ inline with a=0: one extra 00
         # between the tag word and the [01 01] inline pair, then the ordinary
         # body prelude (byte-proven against the healthy DEF twin @0x78253 in
@@ -891,7 +938,7 @@ def _value(d: bytes, p: int, ev: list, hi: int) -> int:
             if a == 0 and ref > SLOT_MAX_ID and plausible_record_start(d, p, hi):
                 ev.append((p0, "OBJEMPTY")); return p
             ev.append((p0, "OBJREF", ref)); return p + 4
-        if (d[p + 4] == 1 and d[p + 1] == 0 and d[p + 2] == 0 and d[p + 3] == 0
+        if (d[p + 4] == 1 and d[p] == 0 and d[p + 1] == 0 and d[p + 2] == 0 and d[p + 3] == 0
                 and 1 <= d[p + 9] <= 40 and all(0x20 <= c < 0x7f for c in d[p + 10:p + 10 + d[p + 9]])):
             ev.append((p0, "LEAF")); return p + 9
         ev.append((p0, "OBJINL"))

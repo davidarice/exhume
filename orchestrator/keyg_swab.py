@@ -64,6 +64,7 @@ ARRAY_ELEM_SIZES = _LE.ARRAY_ELEM_SIZES
 VAL32_TAGS = _LE.VAL32_TAGS
 FILESPEC_MAX_LEN = _LE.FILESPEC_MAX_LEN
 BLOB_UNIT = _LE.BLOB_UNIT
+MASTER_CLS = _LE.MASTER_CLS
 
 # BE record magics: [u8 01][u32be count][u32be tag]
 MAG_GUID1 = b"\x01\x00\x00\x00\x01\x00\x00\x00\x18"
@@ -81,12 +82,13 @@ def _gswap(g: bytes) -> bytes:
 
 class Ctx:
     """Walk bookkeeping: swap spans, raw-mode arrays, inert-pocket ledger."""
-    __slots__ = ("spans", "raw_arrays", "pockets", "record", "clean_from")
+    __slots__ = ("spans", "raw_arrays", "pockets", "record", "clean_from", "pokes")
 
     def __init__(self, record: bool = True):
         self.spans: dict[int, int] = {}      # offset -> width
         self.raw_arrays: set[int] = set()    # ARRAY events framed by the LE fallback
         self.pockets: list[tuple[int, int, str]] = []
+        self.pokes: dict[int, bytes] = {}    # offset -> literal LE bytes (dialect fixups)
         self.record = record
         self.clean_from = -1                 # proven-clean arrival: skip prev_raw
 
@@ -97,6 +99,18 @@ class Ctx:
         if prev is not None and prev != w:
             raise AssertionError(f"span width conflict @0x{off:x}: {prev} vs {w}")
         self.spans[off] = w
+
+    def poke(self, off: int, val: bytes) -> None:
+        """Overwrite a word with fixed LE bytes (applied after the span
+        reversals).  Used where a PPC-dialect constant differs from the
+        Intel-canonical byte a plain byte-order swap would produce, so the
+        swabbed stream is canonical and the LE walker needs no dialect branch."""
+        if not self.record:
+            return
+        prev = self.pokes.get(off)
+        if prev is not None and prev != val:
+            raise AssertionError(f"poke conflict @0x{off:x}: {prev!r} vs {val!r}")
+        self.pokes[off] = val
 
     def mark_all(self, marks) -> None:
         for off, w in marks:
@@ -145,7 +159,16 @@ def try_dict_prelude(d, p, hi, ev, ctx, strict=False):
                 return None
             if d[p + 14:p + 17] != b"\x00\x00\x00":
                 return None
-    elif 1 <= b <= 40:                  # named entry [u8 len][ascii]
+    elif 1 <= b <= 80:                  # named (DEF) entry [u8 len][ascii]
+        # cap 80 (vs the LE walker's 40) so the BE walker recognizes a count-N
+        # source-media P2/QT metadata dict whose first entry is a long DEF key
+        # (reverse-DNS 'com.panasonic...device.manufacturer' = 68 chars). BE-only:
+        # here it just lets the prelude's [0][Y][C] words get word-swapped, so the
+        # swab emits correct LE bytes; the untouched LE walker (cap 40) then reads
+        # the same region via its zeros+PTOK(C)+DEF path (RAW-free, as the native-LE
+        # managed corpus proves), the BE/LE event split being a bounded resync
+        # pocket. Without this the BE walker mis-frames the prelude words and the
+        # swab corrupts the LE file (the P2 misframe that collapsed 'Final mit Logo').
         if not all(0x20 <= c < 0x7f for c in d[p + 10:p + 10 + b]):
             return None
     else:
@@ -597,14 +620,33 @@ def _value(d, p, ev, hi, ctx):
             r = try_dict_prelude(d, p + 2, hi, sub, ctx, strict=True)
             if r is not None:
                 ev.append((p0, "OBJINL")); ev.extend(sub); return r
+        # anika-2007 inline masterClip/captureSource object (value of a clipitem's
+        # master-UUID DEF key): [00 00 00 00][a=0][class byte in MASTER_CLS]
+        # [u32be 0x1f schema-tag][01 01][u32be namelen][ascii name] then a self-
+        # terminating keyed-metadata body.  Word-swap ONLY the two BE u32 head
+        # fields (the 0x1f schema word and namelen); the class byte, 01 01 marker
+        # and name are endian-invariant, and the body's members tokenize on their
+        # own.  The old LEAF misread double-swapped off+11 (01 01 + namelen) into
+        # a 16M leaf count that buried the sequence.  Tightly gated: zero sites on
+        # the other BE corpora (MUSEO/Aaron).
+        if a == 0 and d[p0 + 5] in MASTER_CLS and _u32(d, p0 + 6) == 0x1f \
+                and d[p0 + 10:p0 + 12] == b"\x01\x01":
+            nl = _u32(d, p0 + 12)
+            if 1 <= nl <= 64 and p0 + 16 + nl <= hi \
+                    and all(0x20 <= c < 0x7f for c in d[p0 + 16:p0 + 16 + nl]):
+                ev.append((p0, "MASTEROBJ", d[p0 + 16:p0 + 16 + nl].decode("utf-8", "replace")))
+                ctx.mark(p0 + 6, 4); ctx.mark(p0 + 12, 4)
+                return p0 + 16 + nl
         mk = d[p]; p += 1
         if mk == 0:
             ref = _u32(d, p)
             if a == 0 and ref > SLOT_MAX_ID and plausible_record_start(d, p, hi):
                 ev.append((p0, "OBJEMPTY")); return p
             ev.append((p0, "OBJREF", ref)); ctx.mark(p, 4); return p + 4
-        # LEAF: [u32 A<=0xff][u8 01][u32 B], next byte a DEF length (peeked)
-        if (d[p + 4] == 1 and d[p] == 0 and d[p + 1] == 0 and d[p + 2] == 0
+        # LEAF: [u32 A<=0xff][u8 01][u32 B], next byte a DEF length (peeked). The
+        # off+9 zero (d[p+3]) is required so the anika masterClip schema word
+        # (BE 0x1f, nonzero low byte) can never reach this double-swap path.
+        if (d[p + 4] == 1 and d[p] == 0 and d[p + 1] == 0 and d[p + 2] == 0 and d[p + 3] == 0
                 and 1 <= d[p + 9] <= 40 and all(0x20 <= c < 0x7f for c in d[p + 10:p + 10 + d[p + 9]])):
             ev.append((p0, "LEAF")); ctx.mark(p, 4); ctx.mark(p + 5, 4); return p + 9
         ev.append((p0, "OBJINL"))
@@ -615,6 +657,24 @@ def _value(d, p, ev, hi, ctx):
             ln = _u32(d, p + 5); ctx.mark(p + 1, 4); ctx.mark(p + 5, 4)
             ev.append((p0, "UUID", d[p + 9:p + 9 + ln].decode("ascii", "replace")))
             return p + 9 + ln
+        # anika (v0x17, PPC-2007) inline UUID: same [01][type][len][ascii] geometry
+        # as the Intel form above, but the type constant is 0x18, not 0x22 (byte-
+        # proven: anika's 1544 UUIDs all carry 0x18; MUSEO/Aaron — the only other
+        # BE corpora — carry 0x22, so this branch never fires on them).  A plain
+        # byte-order swap would leave the LE type word as 18 00 00 00; instead we
+        # POKE it to the Intel-canonical 22 00 00 00 so the UNTOUCHED LE walker
+        # reads a normal inline UUID and no dialect branch is needed there.  Swap
+        # the length word as usual.  Version-gated to 0x17 and guarded on a
+        # printable, bounded-length body so a genuine UUIDREF whose ref value
+        # happens to be 0x18 can never be misclaimed.
+        if d[p] == 1 and d[p + 1:p + 5] == b"\x00\x00\x00\x18" \
+                and d[0x2e] == 1 and _u32(d, 0x2f) == 0x17:
+            ln = _u32(d, p + 5)
+            if 0 < ln <= 0x100 and p + 9 + ln <= hi \
+                    and all(0x20 <= c < 0x7f for c in d[p + 9:p + 9 + ln]):
+                ctx.mark(p + 5, 4); ctx.poke(p + 1, b"\x22\x00\x00\x00")
+                ev.append((p0, "UUID", d[p + 9:p + 9 + ln].decode("ascii", "replace")))
+                return p + 9 + ln
         # F_UUIDL long form: managed-0x113 only, zero BE instances — no mirror
         ev.append((p0, "UUIDREF", _u32(d, p + 1))); ctx.mark(p + 1, 4); return p + 5
     if t == 0x1e:
@@ -1395,7 +1455,7 @@ def _diff_splice(ev_be, ev_le, hi):
     return merged, pockets
 
 
-def _apply_spans(data: bytes, spans: dict, lo: int) -> bytes:
+def _apply_spans(data: bytes, spans: dict, lo: int, pokes: dict | None = None) -> bytes:
     buf = bytearray(data)
     _swab_header(buf)
     last_end = 0
@@ -1407,6 +1467,11 @@ def _apply_spans(data: bytes, spans: dict, lo: int) -> bytes:
             raise AssertionError(f"span out of range: 0x{off:x}+{w}")
         buf[off:off + w] = buf[off:off + w][::-1]
         last_end = off + w
+    # literal-byte fixups (applied after the reversals; must not overlap a span)
+    for off, val in (pokes or {}).items():
+        if off < lo or off + len(val) > len(data):
+            raise AssertionError(f"poke out of range: 0x{off:x}+{len(val)}")
+        buf[off:off + len(val)] = val
     return bytes(buf)
 
 
@@ -1439,7 +1504,7 @@ def swab_analysis(data: bytes, lo: int = 0x2e, hi: int | None = None):
         hi = len(data) - 16          # the pipeline's own read margin
     ctx = Ctx()
     ev = tokenize_scoped(data, lo, hi, ctx)
-    out = _apply_spans(data, ctx.spans, lo)
+    out = _apply_spans(data, ctx.spans, lo, ctx.pokes)
     ev_le = _LE.tokenize_scoped(out, lo, hi)
     merged, pockets = _diff_splice(ev, ev_le, hi)
     ctx.pockets.extend((s, e, "junk pocket: LE-walk events adopted (resynced)")

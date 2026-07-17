@@ -529,6 +529,19 @@ def build_tree(events, d):
             pop_completed()
         f = top()
 
+        # anika-2007 masterClip isolate frame (MASTEROBJ): a self-terminating
+        # keyed-metadata record whose members are ISOLATED from the enclosing
+        # clipitem dict (f.iso absorbs their counts).  It ends at the enclosing
+        # clip's next BARE object head — the following clipitem — which arrives
+        # directly at the isolate frame (the master's own nested objects arrive
+        # under a KEY frame, never here).  Close it and re-dispatch that head.
+        # Keyed strictly to the isolate frame: no generic open-frame heuristic.
+        if f.ftype == F_OPEN and f.iso and (k in OBJHEADS or k == "MASTEROBJ"):
+            stack.pop()
+            value_completed()
+            pop_completed()
+            continue
+
         # sparse keyed-element prelude (viewArray form): the element run is
         # over as soon as anything but [PTOK]* + [NKEY elem_key] arrives —
         # declared count C may exceed the serialized element count (the PTOK
@@ -597,6 +610,23 @@ def build_tree(events, d):
             i += 1
             continue
 
+        if k == "MASTEROBJ":
+            # anika-2007 inline masterClip: value of a clipitem's master-UUID key.
+            # Open an ISOLATE frame so the record's own keyed members do not
+            # decrement the enclosing clipitem dict; it self-terminates at the
+            # next bare object head (see the isolate-close rule above).  The head
+            # counts as ONE ordinary dict entry (flags open bit stays clear).
+            if f.ftype == F_ELEMS:
+                f.sawfs = False
+            node = Node(i, off, kind, "member", name=e[2] if len(e) > 2 else None)
+            attach_value(node)
+            fr = Frame(F_OPEN, node)
+            fr.iso = True
+            node.flags |= 2
+            stack.append(fr)
+            i += 1
+            continue
+
         if k in OBJHEADS or k in ("LEAF", "T0C"):
             if f.ftype == F_ELEMS:
                 f.sawfs = False          # a new array item begins
@@ -636,8 +666,23 @@ def build_tree(events, d):
 # (byte-validated; pure event surgery, the walker itself is untouched)
 # ===========================================================================
 
+# A SLOT(1,1,N) whose count N reaches this floor is treated as a candidate
+# misframe (PTOK(1) + a record run swallowed as an INT-slot payload) and its
+# interior is re-tokenized.  256 is the canonical speed-segment coincidence,
+# but the same class occurs at other large N (anika: SLOT(1,1,280) x4 and
+# SLOT(1,1,7680) x2, the latter burying whole sequences).  The floor is only a
+# performance gate — a genuine LARGE int slot is protected by the reconvergence
+# test below (nothing is spliced unless the interior re-parse rejoins the outer
+# stream at a real event with the following event aligned too), so it never
+# corrupts a real slot; it merely avoids paying re-tokenization on the many
+# small genuine int slots (N < 256) that could false-reconverge on their few
+# payload bytes.  On palastin/EPK/managed every large-N slot is exactly 256, so
+# raising 256 from an equality to a floor leaves those corpora byte-identical.
+_MEGASLOT_MIN_N = 256
+
+
 def _splice_megaslots(d, ev):
-    """SLOT(1,1,256) is a framing coincidence (PTOK(1) + a 14FCSpeedSegment
+    """SLOT(1,1,N>=256) is a framing coincidence (PTOK(1) + a 14FCSpeedSegment
     record run swallowed as an INT slot payload).  Re-tokenize the interior
     and splice the true events, re-converging with the outer stream."""
     out = []
@@ -645,9 +690,9 @@ def _splice_megaslots(d, ev):
     n = len(ev)
     while i < n:
         e = ev[i]
-        if e[1] == "SLOT" and e[2] == 1 and e[3] == 0x01 and e[4] == 256:
+        if e[1] == "SLOT" and e[2] == 1 and e[3] == 0x01 and e[4] >= _MEGASLOT_MIN_N:
             p = e[0]
-            send = p + 13 + 4 * 256
+            send = p + 13 + 4 * e[4]
             inner = [(p, "PTOK", 1)] + W.tokenize(
                 d, p + 5, min(send + 4096, len(d) - 16))
             okey = {}
@@ -675,7 +720,7 @@ def _splice_megaslots(d, ev):
                 bound = hit[0] if hit is not None else send + 4096
                 nk = next((kk for kk, t in enumerate(inner)
                            if t[1] == "SLOT" and t[2] == 1 and t[3] == 0x01
-                           and t[4] == 256 and p < t[0] < bound
+                           and t[4] >= _MEGASLOT_MIN_N and p < t[0] < bound
                            and (t[0], "SLOT") not in okey), None)
                 if nk is None:
                     break
@@ -2185,17 +2230,8 @@ _MOTION_FILTERS = [
 ]
 
 
-def clip_motion_filters(doc, el):
-    """Basic Motion / Crop / Opacity for a video clip -> neutral filter specs (the
-    emitter maps each to an emit.Filter, same path as audio/CC).  Emitted only when the
-    clip carries a resolvable `motion` box — matching FCP, which writes these filters
-    for a clip whose Motion tab was touched and none for untouched footage; Slugs and
-    other generators don't resolve a motion box (R1) and are skipped.  Values/keyframes
-    are read positionally by _motion_param (drift-proof).  Byte-validated against the
-    all_motion (static), motion_keyframes (animated) and explicit-filter oracles."""
-    motion = doc.get(el, "motion")
-    if motion is None:
-        return []
+def _motion_filters_from_box(doc, motion):
+    """Basic Motion / Crop / Opacity specs from a `motion` box -> emit.Filter specs."""
     out = []
     for eid, nm, params in _MOTION_FILTERS:
         fbox = doc.get(motion, eid)
@@ -2206,6 +2242,73 @@ def clip_motion_filters(doc, el):
         out.append({"effectid": eid, "name": nm, "category": "motion",
                     "effecttype": "motion", "mediatype": "video", "parameters": specs})
     return out
+
+
+def _recover_spilled_motion(doc, el):
+    """Recover a `motion` box that spilled OUT of its clipitem dict.
+
+    A few v0x17 opacity-fade clips whose waveform-cache-render FILESPEC seeds a
+    tokenizer phantom lose their trailing `motion` box: the phantom consumes a
+    member slot and cascades an overflow that expels the motion box (the clip's
+    LAST member) out of the clipitem dict into an enclosing array, so
+    doc.get(el,'motion') misses it.  The clip's name/in/out/duration/file are
+    untouched (census/names/timing stay exact) — only the trailing motion box
+    escapes.  It lands immediately past the clip's own subtree, as a stray keyed
+    OBJINL child of one of el's ancestors (el.parent when the clip is a non-final
+    array member; a higher ancestor when it is the array's last element and the
+    array had already closed).
+
+    Recover it structurally, correct-or-absent: among the stray keyed OBJINL
+    children of el's ancestor chain whose byte offset falls in the clip's own span
+    (past el's subtree, before the next clip), take the UNIQUE one that resolves as
+    a keyframed motion box.  The resolve-as-keyframed-motion test rejects unrelated
+    stray objects (empty render-cache siblings resolve no basic/crop/opacity param),
+    and the single-match requirement keeps it from ever guessing."""
+    par = el.parent
+    if par is None:
+        return None
+    sibs = par.elements()
+    try:
+        idx = sibs.index(el)
+    except ValueError:
+        return None
+    lo = _subtree_hi(el)
+    last = idx + 1 >= len(sibs)
+    hi = (lo + 0x100) if last else sibs[idx + 1].off
+    cands = []
+    node = par
+    while node is not None:
+        for ch in node.children:
+            if ch.role == "key" and ch.children and lo < ch.off < hi:
+                v = ch.children[0]
+                if v is not None and v.kind in ("OBJINL", "OBJINL1", "OTAGINL") \
+                        and any(len(p["keyframes"]) >= 2
+                                for f in _motion_filters_from_box(doc, v)
+                                for p in f["parameters"]):
+                    cands.append(v)
+        if not last:                   # a non-final member's box stays in el.parent;
+            break                      #   only a last-element box spills further up
+        node = node.parent
+    return cands[0] if len(cands) == 1 else None
+
+
+def clip_motion_filters(doc, el):
+    """Basic Motion / Crop / Opacity for a video clip -> neutral filter specs (the
+    emitter maps each to an emit.Filter, same path as audio/CC).  Emitted only when the
+    clip carries a resolvable `motion` box — matching FCP, which writes these filters
+    for a clip whose Motion tab was touched and none for untouched footage; Slugs and
+    other generators don't resolve a motion box (R1) and are skipped.  Values/keyframes
+    are read positionally by _motion_param (drift-proof).  Byte-validated against the
+    all_motion (static), motion_keyframes (animated) and explicit-filter oracles.
+
+    When doc.get misses the box because the phantom-cascade expelled it from the
+    clipitem dict (_recover_spilled_motion), fall back to the recovered box."""
+    motion = doc.get(el, "motion")
+    if motion is None:
+        motion = _recover_spilled_motion(doc, el)
+        if motion is None:
+            return []
+    return _motion_filters_from_box(doc, motion)
 
 
 def clip_audio_filters(doc, el):
@@ -2638,6 +2741,12 @@ def _census_junk(doc, nd, ss, ms):
     if nm is None:
         return ss == 0 and ms == 0 and _clip_total(doc, nd) == 0
     if nm.lower().endswith(_MEDIA_SUFFIXES):
+        if _is_layered_psd_seq(doc, nd):
+            return False                 # a layered-PSD browser sequence wears
+            #                              a .psd (media-suffix) name and a full
+            #                              master-metadata flavor tie, but IS a
+            #                              browser item — keep it (anika's
+            #                              '50pf1950_frei.psd', ss==ms==5).
         if ss == ms == len(SEQ_FLAVOR):
             return True
         if not _has_timeline(doc, nd) and _clip_total(doc, nd) > 0:
@@ -2660,6 +2769,46 @@ def _is_buried(doc, nd):
     return False
 
 
+def _is_layered_psd_seq(doc, nd):
+    """FCP represents a layered Photoshop (.psd) browser file as a SEQUENCE:
+    one video track per Photoshop layer (audm empty), stored buried and
+    isMaster-flagged exactly like a master clip.  _census_rescue's isMaster
+    guard and the capture-field master guard would both drop it, so it is
+    admitted here as its own keep-class.  anika's FCP-oracle instance is
+    '50pf1950_frei.psd' (1 layer track, layer-clip with 0 sub-elements = 1/0/0).
+
+    A plain PSD MASTER CLIP (RESP 535's 'Pantalla AMG.psd') wears the same .psd
+    name + vidm track + isMaster flag, so the discriminator is the FULL
+    sequence-settings flavor: a PSD imported as a sequence carries all of
+    seqProps/tcData/selectionIn/selectionOut/reels (ss == len(SEQ_FLAVOR)),
+    while a PSD master clip carries NONE (ss == 0).  Require that tie so the
+    master clip stays dropped."""
+    nm = doc.resolve_str(doc.get(nd, "name"))
+    if nm is None or not nm.lower().endswith(".psd"):
+        return False
+    # Full sequence-settings flavor, tolerating ONE drift-dropped key: a PSD
+    # imported as a sequence carries all of SEQ_FLAVOR, but the (correct)
+    # phantom-free anika id space can leave a single member -- seqProps, whose
+    # NKEY reference sits just past a 2-alloc local E step its DEF's tid bracket
+    # under-samples -- one outside the drift bracket, so the node reads 4/5.  A
+    # PSD MASTER CLIP carries NONE (RESP 535's 'Pantalla AMG.psd', ss == 0), so
+    # a >= len-1 majority keeps the margin wide.
+    if sum(1 for k in SEQ_FLAVOR if doc.get(nd, k) is not None) < len(SEQ_FLAVOR) - 1:
+        return False
+    # A layered-PSD SEQUENCE is only its layer tracks -- no timeline clips.  A
+    # PSD master clip that wears the same .psd name and (drifted) 4/5 flavor
+    # (anika's 'RLP+txt_cmyk.psd', 3 layer clips) carries media clips; the
+    # clip-count tie is the discriminator the relaxed flavor threshold would
+    # otherwise blur.  50pf1950_frei.psd holds 0 (byte-verified, OLD and NEW).
+    if _clip_total(doc, nd) != 0:
+        return False
+    med = doc.get(nd, "media")
+    if med is None:
+        return False
+    vm = doc.get(med, "vidm")
+    return vm is not None and doc.get(vm, "track") is not None
+
+
 def _census_rescue(doc, nd, ss, ms):
     """A buried, timeline-less seq-shaped node is normally an embedded
     subclip/master copy — but on chained-storage dialects it is how REAL
@@ -2675,7 +2824,25 @@ def _census_rescue(doc, nd, ss, ms):
       - a NOUNDO undo-pocket only appears on real sequences when no master
         metadata came with it (anika masters carry NOUNDO + comments);
       - the name is spelled INLINE here (STRINL): duplicate serializations
-        back-reference their name (anika's tape-reel subclip copies)."""
+        back-reference their name (anika's tape-reel subclip copies).
+      - a buried, timeline-less node that carries an FCP capture field
+        ('multiclipName' or 'digitize') AND actually holds media clips is a
+        master clip, never a browser-sequence stub: anika's 0340LW/0520GW/VHS
+        false positives (and the DVD_Bienwald masters) each wrap one media
+        clip.  muraishi's chained sequence stubs carry the same capture fields
+        on their dialect but serialize EMPTY (content lives elsewhere,
+        _clip_total==0), so they still pass -- mirroring the _census_junk
+        'timeline-less + has clips = not a sequence' test, keyed on the
+        capture field instead of a media-suffix filename."""
+    if _is_layered_psd_seq(doc, nd):
+        return True                      # layered-PSD browser sequence — kept
+    #                                      ahead of the capture-field master
+    #                                      guard, which fires on masters WITH
+    #                                      clips (RLP's 3 layer clips) too.
+    if (doc.get(nd, "multiclipName") is not None
+            or doc.get(nd, "digitize") is not None) \
+            and _clip_total(doc, nd) > 0:
+        return False
     if ss > 1 or doc.get(nd, "renderQuality") is None:
         return False
     im = doc.get(nd, "isMaster")
@@ -2736,8 +2903,14 @@ def _find_sequences(doc):
         seen.add(id(nd))
         ss, ms = _flavor(doc, nd)
         buried = _is_buried(doc, nd)
-        if ss < ms and not buried and not _has_timeline(doc, nd):
+        if ss < ms and not buried and not _has_timeline(doc, nd) \
+                and not _is_layered_psd_seq(doc, nd):
             continue                     # master-clip wrapper (more master- than seq-
+        #                                  flavored). EXCEPT a layered-PSD browser
+        #                                  sequence, whose one drift-dropped SEQ_FLAVOR
+        #                                  key (seqProps) can tip ss below ms while it
+        #                                  is genuinely a sequence (clip_total==0; a PSD
+        #                                  master clip carries clips and is excluded).
         #                                  flavored). ss==ms==0 = a fresh minimal project
         #                                  sequence (no seqProps/reels set yet) -> keep.
         #                                  A REAL multi-clip timeline overrides the
