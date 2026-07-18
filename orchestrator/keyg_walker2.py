@@ -231,6 +231,37 @@ def is_kfblob(d: bytes, tp: int) -> bool:
     return (d[op:op + t] == b"\x01" * t and d[op + t] == 0
             and d[op + t + 1:op + t + 16] == BLOB_UNIT)
 
+
+def refarray_end(d: bytes, q: int, n: int, hi: int) -> int:
+    """A PTOK(n)-headed ref-array (effect keyframe/point ref-list): the PTOK
+    count word is immediately followed by a CNTW-shaped [18 00 00 00] tag and
+    then exactly `n` units of [00][u32le ref (a valid slot id)][18 00 00 00],
+    the LAST unit's trailing 0x18 tag being dropped (a bare [00][u32 ref]).
+    `q` points at the CNTW tag (== the PTOK site + 5).  Returns the byte offset
+    just past the array iff all n units validate, else None.
+
+    Parsed unit-by-unit the walker instead reads each pair of 9-byte units as
+    one NKEY(bigid)+BLOBREF, and those phantom keyed members drain the enclosing
+    channel DICT (Rat King: vidm closes n/2 members early, orphaning the intact
+    audm).  Consumed whole, the array is one glue token = zero dict members.
+    The all-units-validate gate makes the shape near-impossible to hit by
+    accident (verified 0 fires on every gated corpus)."""
+    if n < 2 or q + 4 > hi or d[q:q + 4] != b"\x18\x00\x00\x00":
+        return None
+    r = q + 4
+    cnt = 0
+    while cnt < n:
+        if r + 5 > hi or d[r] != 0:
+            break
+        ref = _u32(d, r + 1)
+        if not (0 < ref <= SLOT_MAX_ID):
+            break
+        r += 5
+        if d[r:r + 4] == b"\x18\x00\x00\x00":   # full unit; last unit omits it
+            r += 4
+        cnt += 1
+    return r if cnt == n else None
+
 FILESPEC_MAX_FIELDS = 16
 FILESPEC_MAX_LEN = 0x40000
 SLOT_MAX_ID = 0xFFFFF
@@ -254,6 +285,12 @@ else:
 DICT_MAX_COUNT = 0x2000
 # per-element sizes for typed arrays [u32 kind][u8][u32 elem-tag][u32 C][C x elem]
 ARRAY_ELEM_SIZES = {0x03: 4, 0x04: 8, 0x05: 1, 0x1e: 8} | FIXED_TAGS
+# A FIXED-tag ARRAY element omits the per-element flag byte the scalar FIXED form
+# carries, so an et=0x0f element is 8 bytes, not the scalar's 9 (F_CTAGS_SIZES).
+# Rat King master motion-curve arrays: a 101-element 0x0f array sized at 9 over-ran
+# its payload by 101 bytes, so the walker RAW'd into the trailing floats, lost
+# containment, and the clipitem ran away to EOF (video tracks 2-3 + audm severed).
+ARRAY_ELEM_SIZES[0x0f] = 8
 
 
 def try_dict_prelude(d: bytes, p: int, hi: int, ev: list, strict=False):
@@ -740,7 +777,13 @@ def tokenize(d: bytes, lo: int, hi: int, guard_max=50_000_000) -> list[tuple]:
                     ev.insert(len(ev) - 1, (p0, "OBJINL1"))
                     p = r; continue
             if d[p + 1] != 1:
-                ev.append((p0, "PTOK", _u32(d, p + 1))); p += 5; continue
+                ptok_n = _u32(d, p + 1)
+                ra = refarray_end(d, p + 5, ptok_n, hi)
+                if ra is not None:
+                    ev.append((p0, "PTOK", ptok_n))
+                    ev.append((p + 5, "REFARRAY", ptok_n))
+                    p = ra; continue
+                ev.append((p0, "PTOK", ptok_n)); p += 5; continue
             if plausible_record_start(d, p + 5, hi):
                 # sid=1 positional token (falls through OTAG/GUID magics);
                 # only when a valid record follows (T20 body slots etc.)

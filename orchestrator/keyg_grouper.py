@@ -81,7 +81,8 @@ class Node:
         self.count = count      # declared member/element count (containers)
         self.children = []
         self.parent = None
-        self.flags = 0          # 1=open container, 2=isolated, 4=violation
+        self.flags = 0          # 1=open container, 2=isolated, 4=violation,
+        #                         8=spurious clip-OBJREF link (uncounted)
         self._hi = None         # memoized max subtree offset (_subtree_hi)
         self._emap = None       # memoized key -> value-node map (entry_map)
 
@@ -182,6 +183,12 @@ GLUE = frozenset((
     "SLOTGUIDREF", "PTOK", "BAREREF", "FILESPEC", "OBJSLOTREF", "OBJSLOTINL",
     "CNTW", "SLOT", "VAL32", "RAW", "OBJEMPTY", "STRUCT1E", "KFBLOB", "FIXED",
     "OTAGOBJ",
+    # REFARRAY: a PTOK-counted array of [00][u32 ref][0x18 tag] units (an effect
+    # keyframe/point ref-list, e.g. Rat King motion geometry).  The walker emits
+    # it as ONE glue token so its N ref-units count as ZERO dict members; parsed
+    # per-unit they would each complete a keyed member and drain the enclosing
+    # channel DICT, closing vidm early and orphaning audm.
+    "REFARRAY",
 ))
 
 # payload events: attach to the nearest preceding carrier node of given kind
@@ -200,6 +207,19 @@ F_ROOT, F_DICT, F_ELEMS, F_OPEN, F_KEY, F_SLOTBODY, F_T20 = range(7)
 # (the subsequence-link block; set per corpus via key_ids before build)
 UNCOUNTED_KIDS: frozenset = frozenset()
 
+# The `clip`-keyed OBJREF link record is a first-class clipitem member in the
+# linked-clip dialect (the clip/type/link triple, e.g. RESP 533: clip->type)
+# but a SPURIOUS inserted link in the file-clipitem dialect (mcsilver 'Main SD
+# seq.': the record sits between `end` and `file`).  If it is COUNTED there the
+# clipitem meets its member budget one entry early, its trailing member escapes
+# UP into the enclosing vidm dict, and that shift cascades so media's 2nd slot
+# lands off the audm channel -- every audio track is dropped.  Byte-gated to
+# the file-clipitem dialect via CLIP_LINK_ID/FILE_KEY_ID (set per-doc in
+# _configure): uncounted only when the clip-OBJREF's next member is `file`, so
+# the linked-clip dialect (clip->type) is left byte-identical.
+CLIP_LINK_ID = None    # `clip` DEF id, or None when the doc has no such key
+FILE_KEY_ID = None     # `file` DEF id, or None
+
 # itemHistory is a counted entry of ITEM dicts (clipitems/tracks; byte-proven
 # by their declared counts) but NEVER of a media-CHANNEL dict (vidm/audm):
 # the single such site in all corpora (palastin @0x56e578, the '- copie'
@@ -208,6 +228,16 @@ UNCOUNTED_KIDS: frozenset = frozenset()
 # sampleRate only (population census).
 CHANNEL_UNCOUNTED: frozenset = frozenset()   # {'itemHistory', its key id}
 CHANNEL_KEYS: frozenset = frozenset()        # {'vidm','audm', their ids}
+
+# The `track` DEF id (per-doc, set in _Doc._configure).  Gates the sparse-track
+# channel-unwind (trigger B): a `track`-keyed object ELEMS whose declared element
+# count exceeds the serialized element heads never closes by count, so it would
+# ABSORB the following media-channel members (vidm-tail keys then audm -- the
+# whole audio channel) as phantom array fields, severing media.get('audm').  When
+# such a HUNGRY track ELEMS meets a media-CHANNEL key it is force-closed and its
+# enclosing channel dict unwound so the channel key resumes under the MEDIA dict.
+# None when the doc has no `track` key (the gate then never fires).
+TRACK_KEY_ID = None
 
 
 class Frame:
@@ -314,6 +344,8 @@ def build_tree(events, d):
         f = top()
         if f.ftype == F_KEY:
             stack.pop()
+            if f.node.flags & 8:
+                return               # spurious clip-OBJREF link record: uncounted
             if f.node.name in UNCOUNTED_KIDS:
                 return               # link-block record: uncounted
             if f.node.name in CHANNEL_UNCOUNTED:
@@ -458,6 +490,26 @@ def build_tree(events, d):
         node.flags |= 1
         return j + 1
 
+    def spurious_clip_link(j):
+        """True iff events[j] is a `clip`-keyed record whose OBJREF value is a
+        SPURIOUS inserted link (uncounted), not a first-class clipitem member.
+        Signature (CLIP_LINK_ID/FILE_KEY_ID): value is an OBJREF and the next
+        keyed member (past link glue) is `file`.  The linked-clip dialect writes
+        clip->type here and returns False, so it is left byte-identical."""
+        if FILE_KEY_ID is None or j + 1 >= n \
+                or not _core(events[j + 1][1]).startswith("OBJREF"):
+            return False
+        p = j + 2
+        while p < n:
+            pk = _core(events[p][1])
+            if pk in ("DEF", "NKEY"):
+                return events[p][2] == FILE_KEY_ID
+            if pk in GLUE or pk == "RAW":
+                p += 1
+                continue
+            return False
+        return False
+
     # main loop -------------------------------------------------------------
     while i < n:
         e = events[i]
@@ -559,6 +611,33 @@ def build_tree(events, d):
         # attaches as an uncounted field of the array object (object flavor:
         # e.g. children's browser_expanded/clipTop between window elements)
         if k in ("DEF", "NKEY"):
+            # sparse-track runaway (trigger B): a `track`-keyed object ELEMS whose
+            # declared element count exceeds the serialized heads never closes by
+            # count, so it would ABSORB the following media-channel members (the
+            # vidm-tail keys, then audm = the whole audio channel) as phantom
+            # array fields and sever media.get('audm').  When such a HUNGRY track
+            # ELEMS meets a CHANNEL key, force-close the track ELEMS AND unwind its
+            # enclosing channel (vidm) DICT so the channel key attaches to the
+            # MEDIA dict and audm resumes where it belongs.  Gated hard to the
+            # media->channel->track topology and to an incoming channel key: dense
+            # tracks close by count before any channel key, so this never fires on
+            # them (0 fires on every gated corpus -> byte-identical trees).
+            if (e[2] in CHANNEL_KEYS and f.ftype == F_ELEMS and f.left > 0
+                    and f.kmode != "keyed"
+                    and f.node.parent is not None
+                    and f.node.parent.role == "key"
+                    and f.node.parent.name == TRACK_KEY_ID
+                    and f.node.parent.parent is not None
+                    and f.node.parent.parent.parent is not None
+                    and f.node.parent.parent.parent.role == "key"):
+                chan_node = f.node.parent.parent      # the channel (vidm) object
+                f.left = 0
+                for cf in stack:
+                    if cf.node is chan_node and cf.ftype == F_DICT:
+                        cf.left = 0
+                        break
+                pop_completed()
+                f = top()
             if f.ftype == F_ELEMS and f.sawfs:
                 # SPARSE object array (waveCacheArray family): the declared
                 # count is a CAPACITY — fewer items may be serialized (byte-
@@ -574,6 +653,10 @@ def build_tree(events, d):
             kn = Node(i, off, kind, "key", name=e[2])
             f.node.add(kn)
             kf = Frame(F_KEY, kn)
+            if e[2] == CLIP_LINK_ID and f.ftype in (F_DICT, F_T20) \
+                    and spurious_clip_link(i):
+                kn.flags |= 8        # do not count this inserted link record
+                # (value_completed skips the entry; keeps audm from being severed)
             # keyed flavor requires the PTOK position-token prefix (byte-
             # census: ALL keyed-element preludes are PTOK-first; keys in
             # ordinary preludes are uncounted array fields)
@@ -626,6 +709,41 @@ def build_tree(events, d):
             stack.append(fr)
             i += 1
             continue
+
+        # clip-level runaway close (trigger B, one level down): a HUNGRY object-
+        # flavor clip-PRELUDE (F_ELEMS, budget left, its parent KEY is `clip`) whose
+        # declared element count exceeds the serialized clipitem heads never closes
+        # by count, so it ABSORBS the next sibling TRACK head as a phantom element
+        # and cascades through the remaining video tracks and the whole audm channel
+        # (video collapses, audio = 0).  When such a hungry clip-PRELUDE meets a
+        # TRACK-SHAPED head (OBJINL/1 -> DICT -> `clip` key -> head -> PRELUDE),
+        # force-close the clip-PRELUDE and unwind its enclosing track-element DICT so
+        # the head re-attaches to the enclosing `track` PRELUDE (mirrors the trigger-B
+        # unwind above, one level down).  Gated hard to the track-shaped lookahead:
+        # a dense clip serializes all its declared elements and closes BY COUNT before
+        # the next track head arrives (so the top frame is then the `track` PRELUDE,
+        # not a clip-PRELUDE), and a clipitem's DICT-first key is filters/end/in/
+        # masterClips, never `clip` -- so this never fires on a dense clip (0 fires on
+        # every gated corpus -> byte-identical trees).  None-guarded on CLIP_LINK_ID
+        # so it is inert on docs without a `clip` key.
+        if (CLIP_LINK_ID is not None and k in OBJHEADS
+                and f.ftype == F_ELEMS and f.left > 0
+                and f.kmode != "keyed"
+                and f.node.parent is not None
+                and f.node.parent.role == "key"
+                and f.node.parent.name == CLIP_LINK_ID
+                and i + 4 < n and _core(events[i + 1][1]) == "DICT"
+                and _core(events[i + 2][1]) in ("DEF", "NKEY")
+                and events[i + 2][2] == CLIP_LINK_ID
+                and _core(events[i + 4][1]) == "PRELUDE"):
+            tdict = f.node.parent.parent      # the enclosing track-element object
+            f.left = 0
+            for tf in stack:
+                if tf.node is tdict and tf.ftype in (F_DICT, F_T20):
+                    tf.left = 0
+                    break
+            pop_completed()
+            f = top()
 
         if k in OBJHEADS or k in ("LEAF", "T0C"):
             if f.ftype == F_ELEMS:
@@ -875,9 +993,13 @@ class _Doc:
 
     def _configure(self):
         global UNCOUNTED_KIDS, CHANNEL_UNCOUNTED, CHANNEL_KEYS
+        global CLIP_LINK_ID, FILE_KEY_ID, TRACK_KEY_ID
         unc = set(LINK_KEYS)
         unc.update(self.ids[k] for k in LINK_KEYS if k in self.ids)
         UNCOUNTED_KIDS = frozenset(unc)
+        CLIP_LINK_ID = self.ids.get("clip")
+        FILE_KEY_ID = self.ids.get("file")
+        TRACK_KEY_ID = self.ids.get("track")
         ch = {"itemHistory"}
         if "itemHistory" in self.ids:
             ch.add(self.ids["itemHistory"])
