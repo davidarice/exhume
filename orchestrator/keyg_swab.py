@@ -404,6 +404,50 @@ def try_bare_guidref_list(d, p, hi, ev, ctx):
     return end
 
 
+def try_be_refarray_v14(d, p, hi, ev, ctx):
+    """v0x14 BE PTOK-headed ref-array (effect keyframe/point ref-list) — the BE
+    mirror of keyg_walker2.refarray_end.  BE layout at the [01] PTOK head:
+        [01][u32be C][00 00 00 18 CNTW][C units]
+    unit = [00][u32be ref][00 00 00 18], the LAST unit's trailing tag dropped.
+    The refs are valid slot ids (<= SLOT_MAX_ID) but > 0xffff, so the 0x16
+    try_bare_guidref_list (ref <= 0xffff -> GUIDORPH) never claims them, and
+    unhandled the LE walker reads each [ref][00 00 00 18] pair as a phantom
+    NKEY(bigid)+BLOBREF that drains the enclosing clip DICT — severing video
+    track 2 + the audm (Rat King Titles clip: PTOK(10) at 0x104f0b3 et al.).
+    Reversing the count word, the CNTW tag, and each unit's ref+tag words
+    yields the exact LE shape refarray_end consumes as one REFARRAY glue token
+    (0 members).  Version-gated to 0x14; the all-units-validate gate mirrors
+    refarray_end's own and makes an accidental hit near-impossible."""
+    if not (d[0x2e] == 1 and _u32(d, 0x2f) == 0x14):
+        return None
+    C = _u32(d, p + 1)
+    if not (2 <= C <= SLOT_MAX_COUNT) or _u32(d, p + 5) != 0x18:
+        return None
+    base = p + 9
+    marks = []
+    cnt = 0
+    while cnt < C:
+        if base + 5 > hi or d[base] != 0:
+            break
+        ref = _u32(d, base + 1)
+        if not (0 < ref <= SLOT_MAX_ID):
+            break
+        marks.append((base + 1, 4))                    # ref BE -> LE
+        base += 5
+        if d[base:base + 4] == b"\x00\x00\x00\x18":     # inter-unit tag (last omits it)
+            marks.append((base, 4))                    # 00 00 00 18 -> 18 00 00 00
+            base += 4
+        cnt += 1
+    if cnt != C:
+        return None
+    ev.append((p, "PTOK", C))
+    ev.append((p + 5, "REFARRAY", C))
+    ctx.mark(p + 1, 4)                                  # count word BE -> LE
+    ctx.mark(p + 5, 4)                                  # CNTW 00 00 00 18 -> 18 00 00 00
+    ctx.mark_all(marks)
+    return base
+
+
 _SLOT_VALIDATE = True
 
 
@@ -1193,6 +1237,9 @@ def _mirror_step(d, p, hi, ev, ctx, prev_raw=False):
                 ev.insert(len(ev) - 1, (p0, "OBJINL1"))
                 return r
         if d[p + 4] != 1:
+            r = try_be_refarray_v14(d, p, hi, ev, ctx)
+            if r is not None:
+                return r
             ev.append((p0, "PTOK", _u32(d, p + 1))); ctx.mark(p + 1, 4); return p + 5
         if plausible_record_start(d, p + 5, hi):
             ev.append((p0, "PTOK", 1)); ctx.mark(p + 1, 4); return p + 5
@@ -1224,6 +1271,47 @@ def _mirror_step(d, p, hi, ev, ctx, prev_raw=False):
                 or (d[p + 1:p + 10] == MAG_G10_2
                     and d[p + 10:p + 12] == b"\x01\x01")):
             return p + 1
+        # v0x14 pad zero before a BE [01]-headed record: skip the pad so the
+        # [01] branch frames the record.  A FIXED-8 effect object's members
+        # are followed by 2 pad zeros then a PTOK/CNTW/BAREREF/OBJSLOTREF glue
+        # tail (mirror of the resaved-copy layout: FIXED(8,1) NKEY UUID
+        # PTOK(7) CNTW(16) BAREREF OBJSLOTREF).  At the SECOND pad the LE-raw
+        # fallback reads the record's BE [01][00 00 00 n] head as an LE
+        # NKEY(1)+DATA07 (len 218103808 -> past EOF -> collapse at 0x486ea).
+        # The d[p+2:p+5] zero gate excludes every BE NKEY form (their kid
+        # mid/low bytes are nonzero there) and CNTW (needs d[p+3] nonzero), so
+        # only a genuine [01][00 00 00 ...] record can follow; the [01] branch
+        # then frames and swaps it, and the untouched LE walker at the swabbed
+        # pad plain zero-skips to the same record.  Version-gated to 0x14 so it
+        # cannot fire on Aaron v0x13 / MUSEO v0x16 / anika v0x17.
+        if d[p + 1] == 1 and d[p + 2:p + 5] == b"\x00\x00\x00" \
+                and d[0x2e] == 1 and _u32(d, 0x2f) == 0x14:
+            return p + 1
+        # v0x14 FNREC (reel/name filename record): the LE walker's try_fnrec is
+        # a managed-dialect LE construct [L le][0][0][1 le][name][00 00]; in the
+        # BE v0x14 stream it is the mirror [00 00 00 L][0][0][00 00 00 01][name]
+        # [00 00 00].  The current parse misreads the L word as NKEY(<L>) then
+        # fragments the name into DEF/VUNK/CNTW and desyncs (fatal @0x4059d3, the
+        # reel string "11C 001").  Reverse the L word and the [00 00 00 01] word
+        # so the untouched LE walker's try_fnrec (line 819) fires on the swabbed
+        # bytes and consumes the whole record; emit FNREC at p+1 (the L byte) to
+        # match its offset.  Signature is try_fnrec's (11 zero bytes + the 01
+        # word + printable run + 00 00) — ZERO matches on any other corpus — and
+        # version-gated to 0x14 so it cannot touch Aaron v0x13 / MUSEO v0x16 /
+        # anika v0x17.
+        if (d[0x2e] == 1 and _u32(d, 0x2f) == 0x14
+                and d[p + 1:p + 4] == b"\x00\x00\x00" and 14 <= d[p + 4] <= 93
+                and d[p + 5:p + 13] == b"\x00" * 8
+                and d[p + 13:p + 16] == b"\x00\x00\x00" and d[p + 16] == 1):
+            L = d[p + 4]
+            nm_end = p + 4 + L                      # == p_le + 3 + n
+            if (nm_end + 2 <= hi
+                    and all(0x20 <= c < 0x7f for c in d[p + 17:nm_end])
+                    and d[nm_end:nm_end + 2] == b"\x00\x00"):
+                ev.append((p + 1, "FNREC", d[p + 17:nm_end].decode("ascii", "replace")))
+                ctx.mark(p + 1, 4)                  # 00 00 00 L  -> L 00 00 00
+                ctx.mark(p + 13, 4)                 # 00 00 00 01 -> 01 00 00 00
+                return p + 6 + L                    # == p_le + 5 + n
         # v0x13 ORPHAN18 tails (BE mirror of the keyg_walker2 rule): detached
         # count-2 GUID-pair entries after a SLOTGUIDREF head.  LONG 15B
         # [00][u32be 0x18][u32be 0][01][00][u32be ref], SHORT 10B
@@ -1266,6 +1354,59 @@ def _mirror_step(d, p, hi, ev, ctx, prev_raw=False):
             if 0 < kid <= SLOT_MAX_ID and kid & 0xff:
                 ev.append((p0, "NKEY", kid)); ctx.mark(p + 1, 4)
                 return _value(d, p + 6, ev, hi, ctx)
+        # v0x14 zero-led OBJSLOTREF (sid=0): a slot ref whose [01] marker is the
+        # LOW byte of the BE word [00 00 00 01] (not a bare [01] like the d[p]==1
+        # form).  Bytes [00 00 00 01][00][00][mk<=1][u32le w]: the bare-numeric
+        # NKEY(1) mirror below marks(p,4) to swap the head [00 00 00 01] ->
+        # [01 00 00 00], which is exactly what the LE walker reads as glue-R3
+        # OBJSLOTREF(0, w) (sid=0 because the swapped head leaves the sid word
+        # all-zero; w stays raw = u32le).  But that mirror then reads the value
+        # as NKEY(1)+OBJREF(0), taking the w word's high byte (0x75) as the OBJ
+        # alloc count and over-running to 14 B instead of the true 11 B — landing
+        # mid-word on the next member's kid low byte, where the mirror can no
+        # longer re-engage and the following keyed FOURCC ('final') desyncs into
+        # a runaway (collapse @0x5bc715).  Consume exactly 11 B so the mirror
+        # stays in lockstep with the LE walker.  Disambiguated from a genuine
+        # NKEY(1)->OBJ by d[p+8] > 1 (an OBJ's alloc/marker byte there is 0 or 1;
+        # here it is the w word's high-ish byte).  Version-gated to 0x14 so it
+        # cannot fire on Aaron v0x13 / MUSEO v0x16 / anika v0x17.
+        if (d[0x2e] == 1 and _u32(d, 0x2f) == 0x14 and p + 11 <= hi
+                and d[p + 1] == 0 and d[p + 2] == 0 and d[p + 3] == 1
+                and d[p + 4] == 0 and d[p + 5] == 0 and d[p + 6] <= 1
+                and d[p + 8] > 1):
+            # keyed-member misframe guard: these bytes are actually an NKEY
+            # form-1 with a LOW-BYTE-0 kid (0x__00) carrying a valid value
+            # tagword [00 00 00 <tag>], NOT a slot ref.  Rat King (v0x14)
+            # serializes a `NKEY 0x100, BOOL 0` member here inside every
+            # clip/generator effect-param dict's GUIDREF-GUIDREF triple; the
+            # sid=0 OBJSLOTREF misread dropped it from the enclosing dict's
+            # count, so the clip DICT ran one entry short and absorbed the next
+            # sibling clip -- Titles video track 1's 7 clips collapsed into 1
+            # and audm was severed (0 audio tracks).  The genuine zero-led
+            # OBJSLOTREF (RESP 534 lesson) carries w's high byte (0x75) at p+8,
+            # never a value tag, so the tag gate leaves it untouched.  NKEY(kid)
+            # + BOOL consumes the same 11 B, keeping the mirror in lockstep.
+            kid = _u32(d, p + 1)
+            t8 = d[p + 8]
+            if (d[p + 6] == 0 and d[p + 7] == 0 and kid & 0xff == 0
+                    and (kid >> 8) & 0xff and 0 < kid <= SLOT_MAX_ID
+                    and (t8 in SLOT_TAGS or t8 in FIXED_TAGS
+                         or t8 in (0x0c, 0x20, 0x10, 0x16, 0x06))
+                    and _value_extent_sane(d, p + 5, hi)):
+                ev.append((p0, "NKEY", kid)); ctx.mark(p + 1, 4)
+                return _value(d, p + 5, ev, hi, ctx)
+            w = struct.unpack_from("<I", d, p + 7)[0]
+            # the next record is a BE bare-numeric keyed member [u32be kid]
+            # [tag<0x30][00 00 00]; plausible_record_start's BE mirror only knows
+            # the leading-marker form, so accept either here.
+            nxt = p + 11
+            nxt_ok = (plausible_record_start(d, nxt, hi)
+                      or (nxt + 8 <= hi and 0 < _u32(d, nxt) <= SLOT_MAX_ID
+                          and d[nxt + 4:nxt + 7] == b"\x00\x00\x00" and d[nxt + 7] < 0x30))
+            if w <= (0x10000 if d[p + 6] else SLOT_MAX_ID) and nxt_ok:
+                ev.append((p0, "OBJSLOTINL" if d[p + 6] else "OBJSLOTREF", 0, w))
+                ctx.mark(p, 4)          # 00 00 00 01 -> 01 00 00 00 (head)
+                return p + 11
         # NKEY form 1: [00][u32be kid][u32be tagword] (kid low byte nonzero)
         if p + 9 <= hi:
             kid = _u32(d, p + 1)

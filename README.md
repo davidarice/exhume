@@ -1,5 +1,7 @@
 # Final Crack Pro
 
+**Version 1.5.0** — the version is also shown in the terminal when you start the app.
+
 **Open old Final Cut Pro 7 projects in modern editing software.**
 
 Final Crack Pro reads a Final Cut Pro 7 project file (`.fcp`) directly — you do **not**

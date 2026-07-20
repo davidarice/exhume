@@ -239,6 +239,18 @@ CHANNEL_KEYS: frozenset = frozenset()        # {'vidm','audm', their ids}
 # None when the doc has no `track` key (the gate then never fires).
 TRACK_KEY_ID = None
 
+# The `filters` DEF id (per-doc, set in _Doc._configure).  Gates the count-less
+# effect-glue close (v0x14 color-corrector param objects): see build_tree.
+FILTERS_KEY_ID = None
+
+# The `type`/`in`/`out` DEF ids (per-doc, set in _Doc._configure).  Gate the
+# spilled-marker close (trigger E): a marker DICT carries in/out but never a
+# `type` key, so a marker that spilled out of a clip's undercounted markers list
+# is told apart from a real (always type-bearing) timeline element.
+TYPE_KEY_ID = None
+IN_KEY_ID = None
+OUT_KEY_ID = None
+
 
 class Frame:
     __slots__ = ("ftype", "node", "left", "iso", "kmode", "elem_key", "kelem",
@@ -296,6 +308,7 @@ def build_tree(events, d):
     violations = []
     n = len(events)
     i = 0
+    _V14 = len(d) > 0x33 and d[0x2e] == 1 and _u32(d, 0x2f) == 0x14
 
     def top():
         return stack[-1]
@@ -365,6 +378,9 @@ def build_tree(events, d):
             if v is None or not (v.flags & 1):
                 counted_entry_done()
         elif f.ftype == F_ELEMS:
+            if f.node.children and (f.node.children[-1].flags & 4):
+                return               # spilled marker (trigger E): parsed but not
+                #                      a counted element -> preserve array budget
             f.left -= 1
             f.kmode = f.kmode or "object"
 
@@ -485,7 +501,33 @@ def build_tree(events, d):
                 return j + 2
             stack.append(fr)
             return j + 1
-        # bare object head with no recognizable body header: open
+        # bare object head with no recognizable body header: open.
+        # EXCEPT a v0x14 count-less object that is the VALUE OF A KEYED FIELD
+        # directly under a `filters` PRELUDE (F_ELEMS): such a bare F_OPEN can
+        # NEVER close — pop_completed only closes an open frame sitting above a
+        # completed F_DICT (transparent membership decrements the enclosing
+        # dict), but an F_ELEMS is never decremented by an entry, so the open
+        # frame absorbs the filters array's remaining element heads AND every
+        # following clipitem/track/channel to EOF (Rat King v0x14 color-
+        # corrector effect glue: a count-less high-id param object serialized as
+        # an uncounted field of the filters array, e.g. id=81720 @0x645d05 ate
+        # audm tracks 3-8).  Its members are effect glue irrelevant to the
+        # census; close it now (its keyed fields fall to the array as uncounted
+        # object-flavor fields) so the array's real element heads — the sibling
+        # <filter>s — are still counted and the clipitem resumes after them.
+        # Gated hard to a `filters`-parented F_ELEMS: a well-formed <filter>'s
+        # effect params are all COUNTED dicts/scalars that close on their own and
+        # never reach this count-less fallback, and only the color-corrector glue
+        # form lands here — 4 fires on Rat King (both master audms), 0 on any
+        # other structure; _V14-gated so no other dialect's tree can move.
+        if _V14 and FILTERS_KEY_ID is not None and len(stack) >= 2 \
+                and stack[-1].ftype == F_KEY and stack[-2].ftype == F_ELEMS \
+                and stack[-2].node.parent is not None \
+                and stack[-2].node.parent.role == "key" \
+                and stack[-2].node.parent.name == FILTERS_KEY_ID:
+            node.count = 0
+            value_completed()
+            return j + 1
         stack.append(Frame(F_OPEN, node))
         node.flags |= 1
         return j + 1
@@ -509,6 +551,34 @@ def build_tree(events, d):
                 continue
             return False
         return False
+
+    def spilled_marker_head(j):
+        """True iff events[j] is a MARKER object head (OBJINL/OBJINL1 opening a
+        small flat DICT of scalar members with `in`/`out` but NO `type`) that has
+        spilled out of the previous clip's undercounted markers list into the
+        enclosing clip F_ELEMS.  Every real timeline element (clip/generator/
+        transition) declares a `type` key; a marker never does (it carries only
+        name/in/out under a couple of marker-id keys).  A real element's DICT also
+        has NESTED members (filters/masterClips objects), so any non-scalar member
+        bails out -- this can only match the flat marker shape.  Left/absent-id
+        guarded so it is inert unless `type`+`in`+`out` ids all resolve."""
+        tid, iid, oid = TYPE_KEY_ID, IN_KEY_ID, OUT_KEY_ID
+        if tid is None or iid is None or oid is None:
+            return False
+        if j + 1 >= n or _core(events[j + 1][1]) != "DICT":
+            return False
+        c = events[j + 1][2]
+        if not isinstance(c, int) or c <= 0 or c > 12:
+            return False
+        p, keys = j + 2, set()
+        for _ in range(c):
+            if p + 1 >= n or _core(events[p][1]) not in ("DEF", "NKEY"):
+                return False
+            keys.add(events[p][2])
+            if _core(events[p + 1][1]) not in SCALARS:
+                return False          # nested member -> a real element, not a marker
+            p += 2
+        return tid not in keys and iid in keys and oid in keys
 
     # main loop -------------------------------------------------------------
     while i < n:
@@ -682,6 +752,30 @@ def build_tree(events, d):
             i += 1
             continue
 
+        # spilled OTAG-GUID-list ref unit (trigger D, v0x14 ref-array family):
+        # a clipitem/generatoritem DICT that closes BY COUNT before consuming
+        # its trailing SLOTGUIDREF+OTAG-GUID-list effect glue spills that list
+        # into the enclosing clip F_ELEMS.  The list's SLOTGUIDREF/BAREREF units
+        # are GLUE (uncounted, they spill harmlessly), but each list ref is a
+        # BARE scalar OTAGREF -- attach_value would register it as a phantom
+        # ELEMENT, draining the array budget and truncating the real element
+        # tail (Rat King "Master Sequence Locked 8 bit audio" vidm t0: a "Text"
+        # generatoritem's 4-unit OTAG-GUID-list read as 4 phantom clips, which
+        # shifted the array and dropped its trailing elements).  A real timeline
+        # element is ALWAYS an object head (OBJINL1/OBJINL/OTAGINL opening a
+        # DICT), never a bare OTAGREF; and this only fires when the array's most
+        # recent child is the SLOTGUIDREF/BAREREF glue of the very list this ref
+        # continues -- so a genuine object-flavor scalar array field (which is
+        # never preceded by guid-list glue) can never land here.  _V14-gated so
+        # no other dialect's tree can move; attach as glue (uncounted).
+        if _V14 and k == "OTAGREF" and f.ftype == F_ELEMS and f.node.children \
+                and f.node.children[-1].role == "glue" \
+                and _core(f.node.children[-1].kind) in ("SLOTGUIDREF", "BAREREF"):
+            f.node.add(Node(i, off, kind, "glue",
+                            value=e[2] if len(e) > 2 else None))
+            i += 1
+            continue
+
         # values (keyed, element, or member of an open container) -----------
         if k in SCALARS or k in GLUE:
             node = Node(i, off, kind,
@@ -744,6 +838,64 @@ def build_tree(events, d):
                     break
             pop_completed()
             f = top()
+
+        # clip-element sibling force-close (trigger C, one level down from B): a
+        # HUNGRY clipitem DICT (F_DICT/T20, budget left) sitting DIRECTLY on a
+        # clip-PRELUDE F_ELEMS whose own budget is unspent (more clipitems
+        # declared).  In v0x14 a clipitem carrying effect ref-arrays
+        # (SLOTGUIDREF+OTAG-GUID-list / PTOK+REFARRAY, all uncounted glue)
+        # declares more DICT members than the grouper counts, so the clipitem
+        # DICT never closes BY COUNT and would ABSORB the next clipitem head as a
+        # phantom member — cascading through the remaining video tracks and the
+        # whole audm channel (Rat King "Master Sequence Locked" track-2 clipitem-1
+        # @0x5bc53d: DICT(19) = 15 keyed members + two 19-unit ref-arrays, ate
+        # video track 3 + audm to EOF).  When such a hungry clipitem DICT meets a
+        # bare object head, force-close it AND count it as the completed element so
+        # the head re-attaches as the clip's NEXT element.  Gated to v0x14 and the
+        # clip-PRELUDE topology: a well-formed clipitem closes BY COUNT before the
+        # next head arrives (count == serialized members), so the top frame is then
+        # the clip F_ELEMS — never a hungry clipitem DICT — and a clipitem's own
+        # nested objects arrive under a KEY frame, never bare on the DICT.  So this
+        # never fires on a well-formed clip (0 fires on the gated corpus).
+        if (_V14 and k in OBJHEADS and CLIP_LINK_ID is not None
+                and f.ftype in (F_DICT, F_T20) and f.left > 0
+                and len(stack) >= 2
+                and stack[-2].ftype == F_ELEMS
+                and stack[-2].kmode != "keyed"
+                and stack[-2].left > 0
+                and stack[-2].node.parent is not None
+                and stack[-2].node.parent.role == "key"
+                and stack[-2].node.parent.name == CLIP_LINK_ID):
+            f.left = 0
+            pop_completed()
+            f = top()
+
+        # spilled marker (trigger E, v0x14 markers-list undercount): a clip's
+        # markers list can declare fewer entries than serialized, so a trailing
+        # marker object spills out of the clip DICT into the enclosing clip
+        # F_ELEMS.  There it would be parsed as a phantom clip ELEMENT (type-less,
+        # so _elem_kind reads it "clip"), draining the array budget and dropping a
+        # real tail element (Rat King "Master Sequence Locked" vidm t0: a "Marker
+        # 2" object read as a phantom clip, +1 over census).  Parse the marker as
+        # an uncounted object-flavor field (flag 4 -> value_completed skips the
+        # F_ELEMS decrement, and role "member" keeps it out of .elements()), so
+        # the displaced real element keeps its slot.  Gated to v0x14 + a clip-
+        # PRELUDE F_ELEMS (parent key == `clip`, object flavor, budget left) + the
+        # flat type-less marker shape: a well-formed clip's markers stay nested
+        # under its own `markers` key (never a bare head on the clip array), and a
+        # real element always declares `type`, so this 0-fires on dense structures.
+        if (_V14 and k in ("OBJINL", "OBJINL1") and CLIP_LINK_ID is not None
+                and f.ftype == F_ELEMS and f.left > 0 and f.kmode != "keyed"
+                and f.node.parent is not None
+                and f.node.parent.role == "key"
+                and f.node.parent.name == CLIP_LINK_ID
+                and spilled_marker_head(i)):
+            node = Node(i, off, kind, "member")
+            attach_value(node)
+            node.role = "member"
+            node.flags |= 4
+            i = start_body(node, i)
+            continue
 
         if k in OBJHEADS or k in ("LEAF", "T0C"):
             if f.ftype == F_ELEMS:
@@ -993,13 +1145,18 @@ class _Doc:
 
     def _configure(self):
         global UNCOUNTED_KIDS, CHANNEL_UNCOUNTED, CHANNEL_KEYS
-        global CLIP_LINK_ID, FILE_KEY_ID, TRACK_KEY_ID
+        global CLIP_LINK_ID, FILE_KEY_ID, TRACK_KEY_ID, FILTERS_KEY_ID
+        global TYPE_KEY_ID, IN_KEY_ID, OUT_KEY_ID
         unc = set(LINK_KEYS)
         unc.update(self.ids[k] for k in LINK_KEYS if k in self.ids)
         UNCOUNTED_KIDS = frozenset(unc)
         CLIP_LINK_ID = self.ids.get("clip")
         FILE_KEY_ID = self.ids.get("file")
         TRACK_KEY_ID = self.ids.get("track")
+        FILTERS_KEY_ID = self.ids.get("filters")
+        TYPE_KEY_ID = self.ids.get("type")
+        IN_KEY_ID = self.ids.get("in")
+        OUT_KEY_ID = self.ids.get("out")
         ch = {"itemHistory"}
         if "itemHistory" in self.ids:
             ch.add(self.ids["itemHistory"])

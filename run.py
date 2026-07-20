@@ -44,10 +44,13 @@ def main():
             "See the README for how to install a current Python."
             % (MIN_PY[0], MIN_PY[1], sys.version.split()[0]))
 
+    from orchestrator import __version__
+
     port = _pick_port(DEFAULT_PORT)
     url = "http://127.0.0.1:%d" % port
     print()
-    print("  Final Crack Pro is running — everything stays on this computer.")
+    print("  Final Crack Pro v%s is running — everything stays on this computer."
+          % __version__)
     print("  Open this in your browser:  %s" % url)
     print("  (it should open automatically; press Ctrl+C here to stop)")
     print()
