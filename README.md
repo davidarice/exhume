@@ -19,6 +19,14 @@ cut exactly as it was.
 
 ## Get it running
 
+### Downloadable Mac app
+
+A self-contained macOS `.app` can bundle the Python runtime so users do not need
+to install Python. The reproducible development and release process is described
+in [MACOS_PACKAGING.md](MACOS_PACKAGING.md).
+
+### Run from source
+
 You need **Python 3** (version 3.8 or newer). Then it's one command.
 
 ### 1. Download this project

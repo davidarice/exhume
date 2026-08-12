@@ -11,7 +11,9 @@ import atexit
 import json
 import os
 import re
+import secrets
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -289,6 +291,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
+        if path == "/api/session":
+            return self._json({"shutdown_token": self.server.shutdown_token})
         if m := re.fullmatch(r"/api/job/([0-9a-f]{32})", path):
             return self._job_status(m.group(1))
         if m := re.fullmatch(r"/api/convert/([0-9a-f]{32})", path):
@@ -308,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._upload(url.query)
         if url.path == "/api/convert":
             return self._convert()
+        if url.path == "/api/shutdown":
+            return self._shutdown()
         self.close_connection = True   # unread body would poison keep-alive
         self._json({"error": "not found"}, 404)
 
@@ -349,6 +355,16 @@ class Handler(BaseHTTPRequestHandler):
         self._file(STATIC_DIR / name, ctype)
 
     # -- API: upload + job status
+
+    def _shutdown(self):
+        """Stop this local app instance after a same-origin, tokened request."""
+        supplied = self.headers.get("X-FCP-Shutdown", "")
+        if not secrets.compare_digest(supplied, self.server.shutdown_token):
+            return self._forbid("bad shutdown token")
+        self._json({"status": "stopping"})
+        # BaseServer.shutdown() must be called from a different thread than
+        # serve_forever(), which is the main thread in the packaged app.
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def _upload(self, query):
         try:
@@ -524,8 +540,18 @@ def main():
     atexit.register(_cleanup_tempdirs)
     threading.Thread(target=_reaper_loop, daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server.shutdown_token = secrets.token_urlsafe(32)
     server.allowed_hosts = {f"{h}:{args.port}"
                             for h in ("127.0.0.1", "localhost", "[::1]", args.host)}
+
+    # Finder/Dock Quit normally reaches a GUI process as SIGTERM. Convert it
+    # into the same orderly server shutdown used by the browser's Quit button.
+    def request_shutdown(_signum, _frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, request_shutdown)
+        signal.signal(signal.SIGTERM, request_shutdown)
     print(f"FinalCrackPro backend on http://{args.host}:{args.port}", file=sys.stderr)
     try:
         server.serve_forever()

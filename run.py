@@ -67,4 +67,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # Frozen macOS applications re-use their executable for process-pool
+    # workers. PyInstaller's override redirects those worker invocations before
+    # they can start another copy of the web server.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

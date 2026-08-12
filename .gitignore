@@ -3,7 +3,21 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-build/
 venv/
+build/
+dist/
+.build-assets/
+*.spec.bak
+
+# Local Apple signing/notarization material and release receipts
+.signing-local/
+*.release.txt
+*.notary.json
+*.notarytool.json
+
+# Local Final Cut Pro projects may contain private production metadata.
+*.fcp
 
 # macOS
 .DS_Store
