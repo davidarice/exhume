@@ -21,7 +21,7 @@ Build and validate:
 ```
 
 The result is `dist/Final Crack Pro.app`. It is an `onedir` PyInstaller bundle
-with the identifier `ca.macvfx.fcp7pro`. PyInstaller applies an ad-hoc signature
+with the identifier `com.fcp7.to.xml`. PyInstaller applies an ad-hoc signature
 to development builds. That signature is suitable for local testing, not public
 distribution.
 

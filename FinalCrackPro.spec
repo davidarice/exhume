@@ -56,7 +56,7 @@ app = BUNDLE(
     coll,
     name="Final Crack Pro.app",
     icon=str(project_root / ".build-assets" / "FinalCrackPro.icns"),
-    bundle_identifier="ca.macvfx.fcp7pro",
+    bundle_identifier="com.fcp7.to.xml",
     version="1.5.0",
     info_plist={
         "CFBundleDisplayName": "Final Crack Pro",

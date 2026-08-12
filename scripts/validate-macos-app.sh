@@ -21,7 +21,7 @@ version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/
 build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")"
 archs="$(lipo -archs "$executable")"
 
-[[ "$bundle_id" == "ca.macvfx.fcp7pro" ]]
+[[ "$bundle_id" == "com.fcp7.to.xml" ]]
 [[ "$version" == "1.5.0" ]]
 [[ "$build" == "1" ]]
 [[ "$archs" == *"arm64"* || "$archs" == *"x86_64"* ]]
