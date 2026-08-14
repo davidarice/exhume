@@ -1,10 +1,10 @@
-# Final Crack Pro
+# FCP7 Export Tool
 
 **Version 1.5.0** — the version is also shown in the terminal when you start the app.
 
 **Open old Final Cut Pro 7 projects in modern editing software.**
 
-Final Crack Pro reads a Final Cut Pro 7 project file (`.fcp`) directly — you do **not**
+FCP7 Export Tool reads a Final Cut Pro 7 project file (`.fcp`) directly — you do **not**
 need Final Cut Pro installed — and converts it to XML that **DaVinci Resolve** and
 **Adobe Premiere Pro** can import. Your edit comes across: every clip, in the right
 place, with timing and media links intact, so you can relink your footage and see the
@@ -12,7 +12,7 @@ cut exactly as it was.
 
 > ### 🔒 Everything runs on your computer.
 > There is no website and no upload. Your project files and media **never leave your
-> machine** — Final Crack Pro runs a small page in your own browser and does all the
+> machine** — FCP7 Export Tool runs a small page in your own browser and does all the
 > work locally. You can even unplug from the internet while you use it.
 
 ---
@@ -58,7 +58,7 @@ If you see something like `Python 3.11.x`, you're set — skip to step 3. If it 
 In Terminal / Command Prompt, go to the unzipped folder and start it:
 
 ```
-cd path/to/final-crack-pro
+cd path/to/fcp7-export-tool
 python3 run.py
 ```
 
@@ -90,7 +90,7 @@ that's normal; give it a moment.
 
 ## Privacy
 
-Final Crack Pro is fully offline. It serves a page only to your own computer
+FCP7 Export Tool is fully offline. It serves a page only to your own computer
 (`127.0.0.1`), processes the file you give it, and deletes its temporary working copies
 afterward. Nothing is sent anywhere.
 

@@ -4,7 +4,7 @@ set -euo pipefail
 project_dir="${0:A:h:h}"
 source_svg="$project_dir/packaging/AppIcon.svg"
 asset_dir="$project_dir/.build-assets"
-iconset="$asset_dir/FinalCrackPro.iconset"
+iconset="$asset_dir/FCP7ExportTool.iconset"
 master="$asset_dir/AppIcon.svg.png"
 
 mkdir -p "$asset_dir"
@@ -18,5 +18,5 @@ for size in 16 32 128 256 512; do
   retina=$((size * 2))
   sips -z "$retina" "$retina" "$master" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$asset_dir/FinalCrackPro.icns"
-print "Generated: $asset_dir/FinalCrackPro.icns"
+iconutil -c icns "$iconset" -o "$asset_dir/FCP7ExportTool.icns"
+print "Generated: $asset_dir/FCP7ExportTool.icns"

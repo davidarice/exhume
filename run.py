@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Final Crack Pro — convert Final Cut Pro 7 projects to XML, entirely on your machine.
+"""FCP7 Export Tool — convert Final Cut Pro 7 projects to XML, entirely on your machine.
 
 Just run:
 
@@ -40,7 +40,7 @@ def _pick_port(preferred):
 def main():
     if sys.version_info < MIN_PY:
         sys.exit(
-            "Final Crack Pro needs Python %d.%d or newer — you have %s.\n"
+            "FCP7 Export Tool needs Python %d.%d or newer — you have %s.\n"
             "See the README for how to install a current Python."
             % (MIN_PY[0], MIN_PY[1], sys.version.split()[0]))
 
@@ -49,7 +49,7 @@ def main():
     port = _pick_port(DEFAULT_PORT)
     url = "http://127.0.0.1:%d" % port
     print()
-    print("  Final Crack Pro v%s is running — everything stays on this computer."
+    print("  FCP7 Export Tool v%s is running — everything stays on this computer."
           % __version__)
     print("  Open this in your browser:  %s" % url)
     print("  (it should open automatically; press Ctrl+C here to stop)")
@@ -59,7 +59,7 @@ def main():
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     from webapp import server
-    sys.argv = ["final-crack-pro", "--port", str(port), "--host", "127.0.0.1"]
+    sys.argv = ["fcp7-export-tool", "--port", str(port), "--host", "127.0.0.1"]
     try:
         server.main()
     except KeyboardInterrupt:

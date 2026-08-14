@@ -10,4 +10,4 @@ Their complete license texts are included in the application bundle under
   part of a bundled application. Its complete terms are reproduced in
   `PYINSTALLER-COPYING.txt`.
 
-Final Crack Pro itself remains licensed under the MIT License in `LICENSE`.
+FCP7 Export Tool itself remains licensed under the MIT License in `LICENSE`.

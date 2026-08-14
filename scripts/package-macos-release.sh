@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir="${0:A:h:h}"
-source_app="${1:-$project_dir/dist/Final Crack Pro.app}"
+source_app="${1:-$project_dir/dist/FCP7 Export Tool.app}"
 output_dir="${OUTPUT_DIR:-$project_dir/dist/release}"
 identity="${FCP_CODESIGN_IDENTITY:-}"
 notary_profile="${FCP_NOTARY_PROFILE:-}"
@@ -16,9 +16,9 @@ test -d "$source_app"
 
 stage_dir="$(mktemp -d /tmp/fcp7pro-release.XXXXXX)"
 trap 'rm -rf "$stage_dir"' EXIT
-app="$stage_dir/Final Crack Pro.app"
-zip="$stage_dir/Final-Crack-Pro.zip"
-dmg="$output_dir/Final-Crack-Pro-1.5.0-macOS.dmg"
+app="$stage_dir/FCP7 Export Tool.app"
+zip="$stage_dir/FCP7-Export-Tool.zip"
+dmg="$output_dir/FCP7-Export-Tool-1.5.0-macOS.dmg"
 receipt_dir="${FCP_RECEIPT_DIR:-$project_dir/.signing-local/receipts}"
 
 mkdir -p "$output_dir" "$receipt_dir"
@@ -38,9 +38,9 @@ xcrun stapler validate "$app"
 
 dmg_root="$stage_dir/dmg-root"
 mkdir -p "$dmg_root"
-ditto --norsrc --noextattr "$app" "$dmg_root/Final Crack Pro.app"
+ditto --norsrc --noextattr "$app" "$dmg_root/FCP7 Export Tool.app"
 ln -s /Applications "$dmg_root/Applications"
-hdiutil create -quiet -volname "Final Crack Pro" -srcfolder "$dmg_root" \
+hdiutil create -quiet -volname "FCP7 Export Tool" -srcfolder "$dmg_root" \
   -format UDZO -ov "$dmg"
 
 xcrun notarytool submit "$dmg" --keychain-profile "$notary_profile" \

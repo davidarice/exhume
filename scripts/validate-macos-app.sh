@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir="${0:A:h:h}"
-app="${1:-$project_dir/dist/Final Crack Pro.app}"
+app="${1:-$project_dir/dist/FCP7 Export Tool.app}"
 
 test -d "$app"
 
@@ -10,10 +10,10 @@ test -d "$app"
 # Validate a clean, disposable copy exactly as release packaging does.
 stage_dir="$(mktemp -d /tmp/fcp7pro-validate.XXXXXX)"
 trap 'rm -rf "$stage_dir"' EXIT
-ditto --norsrc --noextattr "$app" "$stage_dir/Final Crack Pro.app"
-xattr -cr "$stage_dir/Final Crack Pro.app"
-app="$stage_dir/Final Crack Pro.app"
-executable="$app/Contents/MacOS/Final Crack Pro"
+ditto --norsrc --noextattr "$app" "$stage_dir/FCP7 Export Tool.app"
+xattr -cr "$stage_dir/FCP7 Export Tool.app"
+app="$stage_dir/FCP7 Export Tool.app"
+executable="$app/Contents/MacOS/FCP7 Export Tool"
 test -x "$executable"
 
 bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"

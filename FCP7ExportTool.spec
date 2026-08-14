@@ -31,7 +31,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Final Crack Pro",
+    name="FCP7 Export Tool",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -49,18 +49,18 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="Final Crack Pro",
+    name="FCP7 Export Tool",
 )
 
 app = BUNDLE(
     coll,
-    name="Final Crack Pro.app",
-    icon=str(project_root / ".build-assets" / "FinalCrackPro.icns"),
+    name="FCP7 Export Tool.app",
+    icon=str(project_root / ".build-assets" / "FCP7ExportTool.icns"),
     bundle_identifier="com.fcp7.to.xml",
     version="1.5.0",
     info_plist={
-        "CFBundleDisplayName": "Final Crack Pro",
-        "CFBundleName": "Final Crack Pro",
+        "CFBundleDisplayName": "FCP7 Export Tool",
+        "CFBundleName": "FCP7 Export Tool",
         "CFBundleShortVersionString": "1.5.0",
         "CFBundleVersion": "1",
         "LSApplicationCategoryType": "public.app-category.video",

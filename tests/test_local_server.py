@@ -29,7 +29,7 @@ class LocalServerTests(unittest.TestCase):
     def test_static_index_is_served(self):
         response = self.request("GET", "/")
         self.assertEqual(response.status, 200)
-        self.assertIn(b"FinalCrackPro", response.read())
+        self.assertIn(b"FCP7 Export Tool", response.read())
 
     def test_session_exposes_per_launch_shutdown_token(self):
         response = self.request("GET", "/api/session")

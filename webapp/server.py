@@ -1,4 +1,4 @@
-"""FinalCrackPro backend: upload a binary .fcp project, scan its sequences,
+"""FCP7ExportTool backend: upload a binary .fcp project, scan its sequences,
 and convert selected ones to importable XMEML over a small stdlib HTTP API.
 
 Pure Python 3 stdlib. Parsing/conversion is CPU-bound (seconds to tens of
@@ -244,7 +244,7 @@ def _cleanup_tempdirs():
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "FinalCrackPro/1.0"
+    server_version = "FCP7ExportTool/1.0"
 
     def do_GET(self):
         self._safely(self._route_get)
@@ -531,7 +531,7 @@ def _default_port():
 
 def main():
     global _pool
-    ap = argparse.ArgumentParser(description="FinalCrackPro backend")
+    ap = argparse.ArgumentParser(description="FCP7ExportTool backend")
     ap.add_argument("--port", type=int, default=_default_port())
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
@@ -552,7 +552,7 @@ def main():
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)
-    print(f"FinalCrackPro backend on http://{args.host}:{args.port}", file=sys.stderr)
+    print(f"FCP7ExportTool backend on http://{args.host}:{args.port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

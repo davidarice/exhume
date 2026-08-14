@@ -1,6 +1,6 @@
 # macOS application packaging
 
-Final Crack Pro can be distributed as a self-contained macOS application. The
+FCP7 Export Tool can be distributed as a self-contained macOS application. The
 application includes its Python runtime; end users do not install Python or any
 Python packages.
 
@@ -20,7 +20,7 @@ Build and validate:
 ./scripts/validate-macos-app.sh
 ```
 
-The result is `dist/Final Crack Pro.app`. It is an `onedir` PyInstaller bundle
+The result is `dist/FCP7 Export Tool.app`. It is an `onedir` PyInstaller bundle
 with the identifier `com.fcp7.to.xml`. PyInstaller applies an ad-hoc signature
 to development builds. That signature is suitable for local testing, not public
 distribution.
@@ -37,7 +37,7 @@ in the local shell and macOS Keychain:
 
 ```sh
 export FCP_CODESIGN_IDENTITY="Developer ID Application: Example Company (ABCDE12345)"
-export FCP_NOTARY_PROFILE="final-crack-pro"
+export FCP_NOTARY_PROFILE="fcp7-export-tool"
 ./scripts/package-macos-release.sh
 ```
 

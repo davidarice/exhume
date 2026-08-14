@@ -129,7 +129,7 @@
     if (!shutdownToken) {
       await loadSession();
     }
-    if (!shutdownToken || !window.confirm('Quit Final Crack Pro? Any active conversion will be stopped.')) {
+    if (!shutdownToken || !window.confirm('Quit FCP7 Export Tool? Any active conversion will be stopped.')) {
       return;
     }
     el.quitBtn.disabled = true;
@@ -139,7 +139,7 @@
         headers: {'X-FCP': '1', 'X-FCP-Shutdown': shutdownToken},
       }));
       document.querySelector('main').innerHTML =
-        '<section class="state panel"><h2 class="state-title">Final Crack Pro has stopped</h2>' +
+        '<section class="state panel"><h2 class="state-title">FCP7 Export Tool has stopped</h2>' +
         '<p class="muted">You can close this browser tab.</p></section>';
       el.quitBtn.hidden = true;
     } catch (err) {

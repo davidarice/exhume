@@ -24,9 +24,9 @@ fi
 
 cd "$project_dir"
 "$project_dir/scripts/generate-macos-icon.sh"
-"$venv_dir/bin/pyinstaller" --noconfirm --clean FinalCrackPro.spec
+"$venv_dir/bin/pyinstaller" --noconfirm --clean FCP7ExportTool.spec
 
-app="$project_dir/dist/Final Crack Pro.app"
+app="$project_dir/dist/FCP7 Export Tool.app"
 test -d "$app"
 print "Built (development/ad-hoc signed): $app"
 print "Run scripts/validate-macos-app.sh before testing or packaging."
