@@ -298,6 +298,20 @@ def _is_still(name: str) -> bool:
     return name.lower().endswith(_IMG_EXT)
 
 
+def _safe_channel_count(value, fallback=2):
+    """Return a plausible channel count from heuristic binary metadata.
+
+    The media-characteristics walker can encounter unrelated integers while
+    recovering damaged or ambiguous records. Never let such a false positive
+    expand into millions of master-audio tracks in the generated XML.
+    """
+    try:
+        channels = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    return channels if 1 <= channels <= 64 else fallback
+
+
 def _pathurl(name: str) -> str:
     """A well-formed offline pathurl from a source name (Tier 1 — enough for FCP to
     build an offline clip; Tier 2 replaces this with the real path from the binary)."""
@@ -783,7 +797,7 @@ def export_importable_sequence(fcp_path, *, seq_index=None, seq_name=None,
                     height=int(mc["height"]) if mc.get("height") else s["height"],
                     samplerate=int(mc["samplerate"]) if mc.get("samplerate") else 48000,
                     depth=int(mc["depth"]) if mc.get("depth") else 16,
-                    channels=int(mc["channels"]) if mc.get("channels") else 2,
+                    channels=_safe_channel_count(mc.get("channels")),
                     mediatype=("video" if "video" in types else "audio"),
                     has_video=("video" in types or bool(mc.get("has_video"))),
                     has_audio=("audio" in types or bool(mc.get("has_audio"))),

@@ -40,6 +40,7 @@
     resetBtn: $('reset-btn'),
     errorMessage: $('error-message'),
     retryBtn: $('retry-btn'),
+    quitBtn: $('quit-btn'),
   };
 
   const state = {
@@ -54,6 +55,7 @@
 
   // Bumping the generation cancels every scheduled poll/tick from older views.
   let generation = 0;
+  let shutdownToken = null;
 
   function schedule(fn, ms) {
     const gen = generation;
@@ -112,6 +114,38 @@
   function errorMessage(err) {
     if (err instanceof TypeError) return 'Network error — could not reach the server.';
     return (err && err.message) || 'Something went wrong.';
+  }
+
+  async function loadSession() {
+    try {
+      const data = await readJson(await fetch('/api/session'));
+      shutdownToken = typeof data.shutdown_token === 'string' ? data.shutdown_token : null;
+    } catch (_) {
+      shutdownToken = null;
+    }
+  }
+
+  async function quitApp() {
+    if (!shutdownToken) {
+      await loadSession();
+    }
+    if (!shutdownToken || !window.confirm('Quit FCP7 Export Tool? Any active conversion will be stopped.')) {
+      return;
+    }
+    el.quitBtn.disabled = true;
+    try {
+      await readJson(await fetch('/api/shutdown', {
+        method: 'POST',
+        headers: {'X-FCP': '1', 'X-FCP-Shutdown': shutdownToken},
+      }));
+      document.querySelector('main').innerHTML =
+        '<section class="state panel"><h2 class="state-title">FCP7 Export Tool has stopped</h2>' +
+        '<p class="muted">You can close this browser tab.</p></section>';
+      el.quitBtn.hidden = true;
+    } catch (err) {
+      el.quitBtn.disabled = false;
+      window.alert(errorMessage(err));
+    }
   }
 
   // ---------- 1. idle ----------
@@ -456,6 +490,8 @@
   });
   el.resetBtn.addEventListener('click', toIdle);
   el.retryBtn.addEventListener('click', retry);
+  el.quitBtn.addEventListener('click', quitApp);
 
+  loadSession();
   toIdle();
 })();

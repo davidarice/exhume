@@ -1,4 +1,4 @@
-"""Final Crack Pro engine: Final Cut Pro 7 (.fcp) binary project -> importable XML.
+"""FCP7 Export Tool engine: Final Cut Pro 7 (.fcp) binary project -> importable XML.
 
 Reads the binary project format directly (no Final Cut Pro required) and emits FCP7
 XML (xmeml v5) that DaVinci Resolve and Adobe Premiere Pro can import. Driven by the
