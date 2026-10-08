@@ -48,6 +48,7 @@ object_table/FINAL_BASE); the walker is unchanged.
 from __future__ import annotations
 
 import bisect
+import os
 import struct
 import unicodedata
 from pathlib import Path
@@ -69,9 +70,10 @@ _u32 = lambda d, o: struct.unpack_from("<I", d, o)[0]
 
 class Node:
     __slots__ = ("i", "off", "kind", "role", "name", "value", "count",
-                 "children", "parent", "flags", "_hi", "_emap")
+                 "children", "parent", "flags", "_hi", "_emap", "payload")
 
     def __init__(self, i, off, kind, role, name=None, value=None, count=None):
+        self.payload = None     # decoded value in the file's byte order (spec-reader documents only)
         self.i = i              # event index (-1 for the synthetic root)
         self.off = off
         self.kind = kind        # event kind (or ROOT/OPENELEM)
@@ -1134,6 +1136,7 @@ class _Doc:
                 self.id_at_pos[e[0]] = c
                 c += a
         self.ref_anchors = _mine_backbone_anchors(rev, allocs)
+        self.le = True                       # the walker only ever sees little-endian bytes
         ev = _splice_boxlists(self.d, _splice_megaslots(self.d, rev))
         self._configure()
         self.root = build_tree(ev, self.d)
@@ -1164,6 +1167,10 @@ class _Doc:
         ck = {"vidm", "audm"}
         ck.update(self.ids[k] for k in ("vidm", "audm") if k in self.ids)
         CHANNEL_KEYS = frozenset(ck)
+
+    def fmt(self, f):
+        """struct format for the document's byte order."""
+        return ("<" if getattr(self, "le", True) else ">") + f
 
     # -- lookups -----------------------------------------------------------
     def get(self, node, name):
@@ -1553,6 +1560,17 @@ def _transition_alignment(doc, el, prev_el, next_el):
     return "center"
 
 
+def _effect_scriptid(doc, eff):
+    """The effect's language-independent English id: the `scriptid` entry where a dialect
+    writes one, else the `id` entry (FCP's own XML puts exactly this string in <effectid>:
+    EPK's audio cross-fades carry id='KGAudioTransCrossFade3dB', name='Cross Fade (+3dB)').
+    The walker only ever found the `id` form by accident -- its drift probe for the absent
+    `scriptid` key landed on the neighbouring `id` entry."""
+    if eff is None:
+        return None
+    return doc.resolve_str(doc.get(eff, "scriptid")) or doc.resolve_str(doc.get(eff, "id"))
+
+
 def transition_fields(doc, el, mediatype, prev_el=None, next_el=None):
     """Surface a transitionitem track-element for the emitter: timeline start/end,
     alignment (from `mode` + neighbour geometry), and the raw effect id (English
@@ -1563,7 +1581,7 @@ def transition_fields(doc, el, mediatype, prev_el=None, next_el=None):
     # scriptid is the language-independent English effectid but drifts to None on busy
     # projects; `name` resolves reliably and == effectid on an English install, so use
     # scriptid when present else name (the emitter maps it to a known built-in).
-    scriptid = doc.resolve_str(doc.get(eff, "scriptid")) if eff is not None else None
+    scriptid = _effect_scriptid(doc, eff)
     name = doc.resolve_str(doc.get(eff, "name")) if eff is not None else None
     return {
         "kind": "transition", "mediatype": mediatype,
@@ -1613,6 +1631,29 @@ def _gen_text(doc, eff):
 _PATHURL_SAFE = "/():,-._&"
 
 
+def _decode_carbon_comps(path_raw, elems):
+    """The path block's components from the spec reader's record: `elems` = (ce, fe, pe), the
+    three words the loader reads before the NUL-separated components (pe = component count)."""
+    nc = elems[2] if len(elems) == 3 else 0
+    if not (1 <= nc <= 64):
+        return None
+    off, comps = 0, []
+    for _ in range(nc):
+        e = path_raw.find(b"\x00", off)
+        if e < 0:
+            return None
+        seg = path_raw[off:e]
+        try:
+            comps.append(seg.decode("utf-8"))
+        except UnicodeDecodeError:
+            try:
+                comps.append(seg.decode("mac_roman"))
+            except UnicodeDecodeError:
+                return None
+        off = e + 1
+    return comps
+
+
 def _decode_carbon_path(blob):
     if len(blob) < 12:
         return None
@@ -1636,16 +1677,25 @@ def _decode_carbon_path(blob):
     return comps
 
 
-def filespec_pathurl(d, node_off, hi):
-    """Exact FCP <pathurl> for a FILESPEC node, or None if not a decodable source."""
-    fs = W.try_filespec(d, node_off, hi)
-    if not fs:
-        return None
-    _end, _nf, spans = fs
-    if len(spans) < 5 or spans[2][1] == 0 or spans[4][1] == 0:
-        return None
-    vol = d[spans[2][0]:spans[2][0] + spans[2][1]].decode("utf-8", "replace")
-    comps = _decode_carbon_path(d[spans[4][0]:spans[4][0] + spans[4][1]])
+def filespec_pathurl(d, node_off, hi, rec=None):
+    """Exact FCP <pathurl> for a FILESPEC node, or None if not a decodable source.
+    `rec` is the spec reader's decoded file record (FILESPEC node payload): used when given,
+    so big-endian originals need no byte-level re-parse."""
+    if rec is not None:
+        if not rec.get("vol") or not rec.get("path_raw"):
+            return None
+        vol = rec["vol"].decode("utf-8", "replace")
+        comps = _decode_carbon_comps(rec["path_raw"], rec.get("elems", (0, 0, 0)))
+        _end = rec.get("end", node_off)
+    else:
+        fs = W.try_filespec(d, node_off, hi)
+        if not fs:
+            return None
+        _end, _nf, spans = fs
+        if len(spans) < 5 or spans[2][1] == 0 or spans[4][1] == 0:
+            return None
+        vol = d[spans[2][0]:spans[2][0] + spans[2][1]].decode("utf-8", "replace")
+        comps = _decode_carbon_path(d[spans[4][0]:spans[4][0] + spans[4][1]])
     if not comps:
         return None
     parts = [vol.replace("/", ":")] + [c.replace("/", ":") for c in comps]
@@ -1690,7 +1740,7 @@ def build_pathurl_resolver(doc):
     resolver (+306 clips gained, still 207 distinct sources), EPK Cut 6 256/262 clips
     at 100% precision vs FCP (was 134 mostly wrong)."""
     d, hi = doc.d, len(doc.d) - 16
-    allfs = sorted((n.off, filespec_pathurl(d, n.off, hi))
+    allfs = sorted((n.off, filespec_pathurl(d, n.off, hi, n.payload))
                    for n in doc.root.walk() if n.kind == "FILESPEC")
     allfs = [(o, p) for o, p in allfs if p and not _is_cache_pathurl(p)]
     offs = [o for o, _ in allfs]
@@ -1913,7 +1963,7 @@ def build_source_tc_map(doc):
         return out
 
     hi = len(doc.d) - 16
-    allfs = sorted((n.off, filespec_pathurl(doc.d, n.off, hi))
+    allfs = sorted((n.off, filespec_pathurl(doc.d, n.off, hi, n.payload))
                    for n in doc.root.walk() if n.kind == "FILESPEC")
     allfs = [(o, p) for o, p in allfs if p and not _is_cache_pathurl(p)]
     fs_offs = [o for o, _ in allfs]
@@ -1972,7 +2022,7 @@ def generator_fields(doc, el, mediatype):
         "start": _f64_int(doc, el, "start", []),
         "end": _f64_int(doc, el, "end", []),
         "duration": _f64_int(doc, el, "duration", []),
-        "effectid": doc.resolve_str(doc.get(eff, "scriptid")) if eff is not None else None,
+        "effectid": _effect_scriptid(doc, eff),
     }
 
 
@@ -2008,7 +2058,7 @@ import math as _math
 def _f32_leaf(doc, node):
     if node is None or node.kind != "F32":
         return None
-    v = struct.unpack_from("<f", doc.d, node.off + 5)[0]
+    v = node.payload if node.payload is not None else struct.unpack_from(doc.fmt("f"), doc.d, node.off + 5)[0]
     return v if _math.isfinite(v) else None
 
 
@@ -2046,8 +2096,11 @@ def _fixed_point(doc, node):
     """A center/anchor keyframe value is a FIXED point -> (horiz, vert) F32 pair."""
     if node is None or node.kind != "FIXED":
         return None
-    h = struct.unpack_from("<f", doc.d, node.off + 5)[0]
-    v = struct.unpack_from("<f", doc.d, node.off + 9)[0]
+    if isinstance(node.payload, tuple) and len(node.payload) == 2:
+        h, v = node.payload
+    else:
+        h = struct.unpack_from(doc.fmt("f"), doc.d, node.off + 5)[0]
+        v = struct.unpack_from(doc.fmt("f"), doc.d, node.off + 9)[0]
     return (h, v) if (_math.isfinite(h) and _math.isfinite(v)) else None
 
 
@@ -2071,9 +2124,13 @@ def _motion_param(doc, box, pid, name, vmin, vmax, point=False, default=0.0):
 
     def rd(n):
         if point:
-            return (struct.unpack_from("<f", d, n.off + 5)[0],
-                    struct.unpack_from("<f", d, n.off + 9)[0])
-        return struct.unpack_from("<f", d, n.off + 5)[0]
+            if isinstance(n.payload, tuple) and len(n.payload) == 2:
+                return (float(n.payload[0]), float(n.payload[1]))
+            return (struct.unpack_from(doc.fmt("f"), d, n.off + 5)[0],
+                    struct.unpack_from(doc.fmt("f"), d, n.off + 9)[0])
+        if n.payload is not None:
+            return float(n.payload)
+        return struct.unpack_from(doc.fmt("f"), d, n.off + 5)[0]
 
     keys = []
     kflist = next((v for _, v in box.entries() if v is not None and v.elements()), None)
@@ -2082,7 +2139,7 @@ def _motion_param(doc, box, pid, name, vmin, vmax, point=False, default=0.0):
             w = next((x for x in e.walk() if x.kind == "F64"), None)
             vv = next((x for x in e.walk() if x.kind == leafkind), None)
             if w is not None and vv is not None:
-                keys.append((struct.unpack_from("<d", d, w.off + 5)[0], rd(vv)))
+                keys.append((float(w.payload) if w.payload is not None else struct.unpack_from(doc.fmt("d"), d, w.off + 5)[0], rd(vv)))
     fe = [v for _, v in box.entries() if v is not None and v.kind == leafkind]
     val = rd(fe[0]) if fe else (0.0, 0.0) if point else 0.0
     return {"name": name, "parameterid": pid, "valuemin": vmin, "valuemax": vmax,
@@ -2257,7 +2314,7 @@ def build_source_media_map(doc):
         return int(x.value) if x is not None and x.value is not None else None
 
     hi = len(doc.d) - 16
-    allfs = sorted((n.off, filespec_pathurl(doc.d, n.off, hi))
+    allfs = sorted((n.off, filespec_pathurl(doc.d, n.off, hi, n.payload))
                    for n in doc.root.walk() if n.kind == "FILESPEC")
     allfs = [(o, p) for o, p in allfs if p and not _is_cache_pathurl(p)]
     fs_offs = [o for o, _ in allfs]
@@ -2443,7 +2500,7 @@ def clip_named_filters(doc, el):
         eff = doc.get(fe, "effect")
         if eff is None:
             continue
-        sid = doc.resolve_str(doc.get(eff, "scriptid"))
+        sid = _effect_scriptid(doc, eff)
         nm = doc.resolve_str(doc.get(eff, "name"))
         nm = _FILTER_XLATE.get(nm, nm)
         if "Color Corrector" in (sid, nm):
@@ -2731,7 +2788,10 @@ def _seg_fields_from_tree(doc, sdw):
     # COUNT-BOUND: the segment's PTOK word says how many keyed records are ITS
     # OWN; keyed children past that belong to the enclosing speed data (start/
     # end F64s) and must not leak into the anchorOffset sum.
-    count = _t20_seg_count(doc.d, t20.off)
+    if getattr(doc, "exact_ids", False) and t20.count is not None:
+        count = t20.count                 # exact tree: the segment object's own member count (any byte order)
+    else:
+        count = _t20_seg_count(doc.d, t20.off)
     f64s, reverse, seen = [], False, 0
     for c in t20.children:
         if c.role != "key":
@@ -2916,6 +2976,17 @@ def clip_link_members(doc, el):
     lk = doc.get(el, "link")
     if lk is None:
         return []
+    els = lk.elements()
+    if els and all(e.kind == "STRUCT1E" and isinstance(e.payload, tuple) for e in els):
+        # spec-reader document: the array elements carry the loader's decoded item specs
+        # (u8 mediatype, u8 stereo flag, i16 trackindex, i32 clipindex)
+        out = []
+        for e in els:
+            mt, gi, ti, ci = e.payload
+            if mt not in (1, 2) or gi not in (0, 1) or not (0 <= ci < 0x10000):
+                return []
+            out.append((mt, ti, ci, gi))
+        return out
     d = doc.d
     m = d.find(b"\x1e\x00\x00\x00", lk.off, lk.off + 48)
     if m < 0:
@@ -3043,9 +3114,18 @@ def _is_buried(doc, nd):
     anc = nd.parent
     while anc is not None:
         if _is_seq_shaped(doc, anc):
-            return True                  # embedded subsequence copy
+            break                        # embedded subsequence copy ...
         anc = anc.parent
-    return False
+    else:
+        return False
+    # ... unless the project itself lists it as a browser item.  Exact-id documents
+    # (keyg_specdoc.SpecDoc) nest a sequence's one inline copy wherever it is first
+    # serialised -- often inside the clipitem that nests it -- and reference it from
+    # the browser `children` and from the item registry by slot id.  The walker
+    # tree never needed this: its leaky container boundaries hoisted such nests.
+    if getattr(doc, "exact_ids", False) and doc.referenced_from_children(nd):
+        return False
+    return True
 
 
 def _is_layered_psd_seq(doc, nd):
@@ -3176,10 +3256,15 @@ def _find_sequences(doc):
     """All project sequences, document order."""
     hits = []
     seen = set()
+    exact = getattr(doc, "exact_ids", False)
     for nd in doc.root.walk():
         if not _is_seq_shaped(doc, nd):
             continue
         seen.add(id(nd))
+        if exact and not doc.in_browser(nd):
+            continue                     # exact-id tree: a copy outside the browser
+            #                              hierarchy (undo / print-to-video source
+            #                              serialisations) is never a browser item
         ss, ms = _flavor(doc, nd)
         buried = _is_buried(doc, nd)
         if ss < ms and not buried and not _has_timeline(doc, nd) \
@@ -3357,11 +3442,21 @@ def _registry_gate(doc, tops):
     if not sites or len(sites) > _REG_MAX_SITES \
             or len(sites) > 1.2 * len(reg):
         return tops                      # site pool disagrees with the table
-    matched = _registry_align(sites, reg)
-    if len(matched) < 0.9 * len(sites):
-        return tops                      # alignment too poor to trust
-    site_of = {id(nd): i for i, (_, _, nd) in enumerate(sites)}
+    exact = getattr(doc, "exact_ids", False)
+    if exact:
+        reg = list(doc.registry_ids())   # tree-based: byte-order independent
+        if not reg:
+            return tops
     reg_a = set(reg)
+    if exact:
+        # exact-id document (keyg_specdoc.SpecDoc): a site is registered iff its mainDict
+        # id is in the table -- no drift alignment, no reliability threshold needed
+        matched = {i for i, (m, e, _) in enumerate(sites) if (e if e is not None else m) in reg_a}
+    else:
+        matched = _registry_align(sites, reg)
+        if len(matched) < 0.9 * len(sites):
+            return tops                  # alignment too poor to trust
+    site_of = {id(nd): i for i, (_, _, nd) in enumerate(sites)}
     keep = []
     for nd in tops:
         i = site_of.get(id(nd))
@@ -3377,7 +3472,7 @@ def _registry_gate(doc, tops):
                 joined = (md is not None and md.kind.startswith("OBJREF")
                           and md.value in reg_a)
         nm = doc.resolve_str(doc.get(nd, "name"))
-        if not joined and not (nm is None or _TC_SUFFIX.search(nm)):
+        if not joined and not exact and not (nm is None or _TC_SUFFIX.search(nm)):
             # CORROBORATION REQUIRED to drop: the alignment's max-count
             # matching cannot prefer a real item over an adjacent copy of
             # it — on RESP 534 the None dups STOLE four real sequences'
@@ -3521,10 +3616,26 @@ def _master_name_of(doc, el, u2n):
     return u2n.get(mu.value)
 
 
+def _make_doc(fcp_path):
+    """The document for `fcp_path`: the spec-reader tree (keyg_specdoc.SpecDoc: the loader's
+    exact grammar and reference ids, so _Doc's drift machinery is inert) unless the environment
+    variable FCP2XML_READER is "walker".  When the spec reader cannot complete the file the
+    walker tree is used instead and the reason is recorded in doc.fallbacks."""
+    if os.environ.get("FCP2XML_READER", "spec") != "walker":
+        from .keyg_specdoc import SpecDoc
+        sd = SpecDoc(fcp_path)
+        if sd.reader_error is None:
+            return sd
+        doc = _Doc(fcp_path)
+        doc.fallbacks.append((None, "spec-reader", sd.reader_error))
+        return doc
+    return _Doc(fcp_path)
+
+
 def grouper(fcp_path, with_meta=False):
     """Group a .fcp project into sequences of ordered clipitems (see module
     docstring for the exact contract and validation numbers)."""
-    doc = _Doc(fcp_path)
+    doc = _make_doc(fcp_path)
     tops = _find_sequences(doc)
     _seq_anchors(doc, tops)
     by_element, by_ref = _embedded_names(doc, tops)
@@ -3602,7 +3713,7 @@ def grouper(fcp_path, with_meta=False):
 
 if __name__ == "__main__":
     import sys
-    for p in sys.argv[1:]:
+    for p in sys.argv[1:] or ["/Users/davidrice/fcpshare/outbox/mc_one.fcp"]:
         seqs = grouper(p)
         print(f"{p}: {len(seqs)} sequences")
         for s in seqs:

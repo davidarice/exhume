@@ -1975,9 +1975,7 @@ def key_ids(d: bytes, lo: int = 0x2e, hi: int | None = None) -> dict:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 2:
-        sys.exit("usage: python -m orchestrator.keyg_walker2 <project.fcp>")
-    path = sys.argv[1]
+    path = sys.argv[1] if len(sys.argv) > 1 else "/Users/davidrice/fcpshare/palastin.fcp"
     raw = Path(path).read_bytes()
     d = raw + b"\x00" * 64
     ev = tokenize(d, 0x2e, len(raw))

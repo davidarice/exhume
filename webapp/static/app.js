@@ -200,7 +200,7 @@
     el.parsingFilename.textContent = state.filename;
     el.parsingElapsed.textContent = '0';
     show('parsing');
-    announce('Cracking open ' + state.filename);
+    announce('Reading ' + state.filename);
     schedule(tickElapsed, 500);
     schedule(pollJob, POLL_MS);
   }

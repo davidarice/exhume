@@ -1,19 +1,28 @@
-# Final Crack Pro
+# Exhume
 
-**Version 1.5.0** — the version is also shown in the terminal when you start the app.
+**Version 2.0.0** — the version is also shown in the terminal when you start the app.
+
+New in 2.0.0: the XML is now produced the way Final Cut Pro 7 itself writes it — on the
+projects used to check it, the output is identical to Final Cut's own XML export.
 
 **Open old Final Cut Pro 7 projects in modern editing software.**
 
-Final Crack Pro reads a Final Cut Pro 7 project file (`.fcp`) directly — you do **not**
+Exhume reads a Final Cut Pro 7 project file (`.fcp`) directly — you do **not**
 need Final Cut Pro installed — and converts it to XML that **DaVinci Resolve** and
 **Adobe Premiere Pro** can import. Your edit comes across: every clip, in the right
 place, with timing and media links intact, so you can relink your footage and see the
 cut exactly as it was.
 
-> ### 🔒 Everything runs on your computer.
-> There is no website and no upload. Your project files and media **never leave your
-> machine** — Final Crack Pro runs a small page in your own browser and does all the
-> work locally. You can even unplug from the internet while you use it.
+> ### 🔒 This version runs entirely on your computer.
+> Nothing is uploaded. Your project files and media **never leave your machine** —
+> Exhume runs a small page in your own browser and does all the work locally. You can
+> even unplug from the internet while you use it.
+>
+> Prefer not to install anything? The hosted edition at **[exhume.app](https://exhume.app)**
+> does the same conversion on our servers and deletes your project within 24 hours.
+
+*Exhume was previously published as "Final Crack Pro"; old links to that repository
+redirect here.*
 
 ---
 
@@ -50,7 +59,7 @@ If you see something like `Python 3.11.x`, you're set — skip to step 3. If it 
 In Terminal / Command Prompt, go to the unzipped folder and start it:
 
 ```
-cd path/to/final-crack-pro
+cd path/to/exhume
 python3 run.py
 ```
 
@@ -82,7 +91,7 @@ that's normal; give it a moment.
 
 ## Privacy
 
-Final Crack Pro is fully offline. It serves a page only to your own computer
+Exhume is fully offline. It serves a page only to your own computer
 (`127.0.0.1`), processes the file you give it, and deletes its temporary working copies
 afterward. Nothing is sent anywhere.
 

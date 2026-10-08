@@ -1,4 +1,4 @@
-"""FinalCrackPro backend: upload a binary .fcp project, scan its sequences,
+"""Exhume backend: upload a binary .fcp project, scan its sequences,
 and convert selected ones to importable XMEML over a small stdlib HTTP API.
 
 Pure Python 3 stdlib. Parsing/conversion is CPU-bound (seconds to tens of
@@ -49,91 +49,116 @@ _pool = None     # shared ProcessPoolExecutor, created in main()
 
 # --- worker-process functions (module-level so they pickle) -------------------
 
-def _le_sibling(path):
-    """Deterministic path of the little-endian transcode next to the upload."""
-    return str(Path(path).with_name("project_le.fcp"))
+def _tc(frames, timebase):
+    """hh:mm:ss:ff at the sequence's timebase (non-drop; the UI's duration column)."""
+    f = int(frames)
+    ff = f % timebase
+    sec = f // timebase
+    return f"{sec // 3600:02d}:{sec // 60 % 60:02d}:{sec % 60:02d}:{ff:02d}"
+
+
+def _sequences_of(root):
+    """The browser's sequences in document order from the whole-project document: the
+    <sequence> elements under <project><children> and any <bin><children>, skipping the
+    id-only references the exporter writes for a sequence met earlier (spec §3)."""
+    out = []
+
+    def walk(children):
+        for el in children:
+            if el.tag == "sequence" and el.find("media") is not None:
+                out.append(el)
+            elif el.tag == "bin":
+                ch = el.find("children")
+                if ch is not None:
+                    walk(ch)
+
+    ch = root.find("project/children")
+    if ch is not None:
+        walk(ch)
+    return out
+
+
+_DOCS = {}          # per worker process: path -> (size, mtime, parsed project); at most _DOC_CACHE
+_DOC_CACHE = 2
+
+
+def _load(path):
+    """The parsed project, parsed once per worker process and kept while the upload is unchanged:
+    parsing is the larger half of a conversion, and a scan and the conversions that follow it
+    all read the same file."""
+    from orchestrator import xmeml_emit
+    st = os.stat(path)
+    key = (st.st_size, st.st_mtime_ns)
+    hit = _DOCS.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    doc = xmeml_emit.load(path)
+    if len(_DOCS) >= _DOC_CACHE:
+        _DOCS.pop(next(iter(_DOCS)))
+    _DOCS[path] = (key, doc)
+    return doc
 
 
 def _scan_worker(path):
-    """One full parse -> small plain-JSON summary (crosses the process boundary)."""
-    from orchestrator import export
-    from orchestrator.emit import _tc_string
-    # triage BEFORE the expensive parse: real KeyGrip magic, and the byte-order
-    # flag at 0x08 (01 = Intel/little-endian; 00 = PowerPC-era big-endian, the
-    # same object graph with byte-swapped scalars)
+    """One full export -> small plain-JSON summary per sequence (crosses the process boundary)."""
+    import xml.etree.ElementTree as ET
+    from orchestrator import xmeml_emit
+    # triage BEFORE the expensive parse: real KeyGrip magic (the spec reader takes
+    # Intel and PowerPC-era byte orders alike)
     with open(path, "rb") as fh:
         head = fh.read(16)
     if head[:5] != b"\xa2KeyG":
         raise ValueError("This is not a Final Cut Pro project file.")
-    from orchestrator import keyg_swab
-    if keyg_swab.is_big_endian(head):
-        # PowerPC-era project: transcode once to a little-endian twin beside
-        # the upload and scan THAT (_convert_worker picks the twin up too)
-        le_path = _le_sibling(path)
-        try:
-            tmp = le_path + ".tmp"
-            keyg_swab.swab_file(path, tmp)
-            os.replace(tmp, le_path)
-        except Exception:
-            raise ValueError(
-                "this is a PowerPC-era (big-endian) Final Cut Pro project — "
-                "an older byte order this converter can't read yet. "
-                "Re-saving it with Intel FCP 6/7 would convert it.") from None
-        path = le_path
-    rich = export._enriched_sequences(path)
+    root = ET.fromstring(xmeml_emit.export_project(_load(path), project_name=os.path.splitext(os.path.basename(path))[0]))
     seqs = []
-    for i, s in enumerate(rich):
-        tracks = s["video"] + s["audio"]
-        items = [it for tr in tracks for it in tr]
-        dur = max((int(it["end"]) for it in items
-                   if it.get("end") is not None and int(it["end"]) >= 0), default=0)
-        tb, ntsc = s["timebase"], s["ntsc"] == "TRUE"
-        # start_tc is None (default) or {'frame','displayformat'} — test None
-        # explicitly (frame 0 is a real recovered value); DF sequences show
-        # the semicolon string
-        stc = s.get("start_tc")
-        if isinstance(stc, dict):
-            df = stc.get("displayformat") == "DF"
-            start_str = _tc_string(int(stc["frame"]), tb, df) if stc.get("frame") is not None else None
-        else:
-            start_str = _tc_string(int(stc), tb) if stc else None
-        raw = s["name"] or None
+    for i, s in enumerate(_sequences_of(root)):
+        rate = s.find("rate")
+        tb = int(rate.findtext("timebase") or 0) if rate is not None else 0
+        ntsc = (rate.findtext("ntsc") if rate is not None else "") == "TRUE"
+        fmt = s.find("media/video/format/samplecharacteristics")
+        items = [it for kind in ("video", "audio")
+                 for tr in s.findall(f"media/{kind}/track") for it in tr]
+        dur = int(float(s.findtext("duration") or 0))
+        raw = s.findtext("name")
         seqs.append({
             "index": i,
             "name": raw or f"Sequence {i + 1}",
             "raw_name": raw,     # exact name from the binary (may be null)
+            "uuid": s.findtext("uuid"),
             "timebase": tb,
             "ntsc": ntsc,
             "fps": f"{tb * 1000 / 1001:.2f}" if ntsc else str(tb),
-            "width": s["width"],
-            "height": s["height"],
-            "vtracks": len(s["video"]),
-            "atracks": len(s["audio"]),
-            "clips": sum(1 for it in items if it.get("kind", "clip") == "clip"),
-            "transitions": sum(1 for it in items if it.get("kind") == "transition"),
-            "generators": sum(1 for it in items if it.get("kind") == "generator"),
+            "width": int(fmt.findtext("width")) if fmt is not None and fmt.findtext("width") else None,
+            "height": int(fmt.findtext("height")) if fmt is not None and fmt.findtext("height") else None,
+            "vtracks": len(s.findall("media/video/track")),
+            "atracks": len(s.findall("media/audio/track")),
+            "clips": sum(1 for it in items if it.tag == "clipitem"),
+            "transitions": sum(1 for it in items if it.tag == "transitionitem"),
+            "generators": sum(1 for it in items if it.tag == "generatoritem"),
             "duration_frames": dur,
-            "duration_tc": _tc_string(dur, tb),
-            "start_tc": start_str,
-            "markers": len(s.get("markers") or []),
+            "duration_tc": _tc(dur, tb) if tb else None,
+            "start_tc": s.findtext("timecode/string"),
+            "markers": len(s.findall("marker")),
         })
     if not seqs:
         raise ValueError("no sequences found in this project")
     return seqs
 
 
-def _convert_worker(path, index, out_path):
-    """Re-parse the project and export one sequence; returns the XML byte count."""
-    from orchestrator import export
-    le_path = _le_sibling(path)
-    if os.path.exists(le_path):     # big-endian upload: use the transcoded twin
-        path = le_path
-    xml = export.export_importable_sequence(path, seq_index=index)
-    # temp file + rename so a concurrent reader never sees a partial file
-    tmp = out_path + ".tmp"
-    Path(tmp).write_bytes(xml)
-    os.replace(tmp, out_path)
-    return len(xml)
+def _convert_worker(path, parts):
+    """Export the selected sequences (by UUID, else by name) as their own xmeml documents, parsing
+    the project once; `parts` is a list of (index, which, out_path); returns {index: byte count}."""
+    from orchestrator import xmeml_emit
+    doc = _load(path)
+    sizes = {}
+    for index, which, out_path in parts:
+        xml = xmeml_emit.export_item(doc, which)
+        # temp file + rename so a concurrent reader never sees a partial file
+        tmp = out_path + ".tmp"
+        Path(tmp).write_bytes(xml)
+        os.replace(tmp, out_path)
+        sizes[index] = len(xml)
+    return sizes
 
 
 # --- helpers -------------------------------------------------------------------
@@ -177,7 +202,7 @@ def _convert_state(conv):
         fut = p["future"]
         if fut is not None and fut.done():
             try:
-                p["bytes"] = fut.result()
+                p["bytes"] = fut.result()[p["index"]]
             except Exception as exc:
                 traceback.print_exc()
                 conv["error"] = (f"sequence {p['index']}: "
@@ -242,7 +267,7 @@ def _cleanup_tempdirs():
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "FinalCrackPro/1.0"
+    server_version = "Exhume/1.0"
 
     def do_GET(self):
         self._safely(self._route_get)
@@ -373,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
                          (p.partition("=") for p in query.split("&")) if k == "name"), "")
         filename = os.path.basename(unquote(raw_name)) or "upload.fcp"
 
-        tmpdir = tempfile.mkdtemp(prefix="finalcrackpro-")
+        tmpdir = tempfile.mkdtemp(prefix="exhume-")
         with _lock:
             _tempdirs.append(tmpdir)
         dest = Path(tmpdir) / "project.fcp"
@@ -446,13 +471,18 @@ class Handler(BaseHTTPRequestHandler):
         out_dir = Path(job["dir"]) / conv_id
         out_dir.mkdir()
         parts = []
+        work = []
         for i in indices:
             stem = _sanitize_component(job["sequences"][i]["raw_name"], f"sequence-{i + 1}")
             fname = f"{i + 1:02d} - {stem}.xml"
             out_path = str(out_dir / fname)
-            fut = _submit(_convert_worker, job["path"], i, out_path)
+            seq = job["sequences"][i]
+            work.append((i, seq.get("uuid") or seq["raw_name"], out_path))
             parts.append({"index": i, "name": fname, "path": out_path,
-                          "future": fut, "bytes": None})
+                          "future": None, "bytes": None})
+        fut = _submit(_convert_worker, job["path"], work)   # one parse for all selected sequences
+        for p in parts:
+            p["future"] = fut
         with _lock:
             job["ts"] = time.time()
             _converts[conv_id] = {"job": job_id, "parts": parts,
@@ -515,7 +545,7 @@ def _default_port():
 
 def main():
     global _pool
-    ap = argparse.ArgumentParser(description="FinalCrackPro backend")
+    ap = argparse.ArgumentParser(description="Exhume backend")
     ap.add_argument("--port", type=int, default=_default_port())
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
@@ -526,7 +556,7 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.allowed_hosts = {f"{h}:{args.port}"
                             for h in ("127.0.0.1", "localhost", "[::1]", args.host)}
-    print(f"FinalCrackPro backend on http://{args.host}:{args.port}", file=sys.stderr)
+    print(f"Exhume backend on http://{args.host}:{args.port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
