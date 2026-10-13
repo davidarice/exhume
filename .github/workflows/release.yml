@@ -265,9 +265,7 @@ jobs:
           | **Windows** 10 and 11 (64-bit) | `Exhume-Windows-Setup.exe` |
           | **Linux** (x86-64) | `Exhume-Linux-x86_64.AppImage` |
 
-          These downloads are not code-signed yet, so your computer warns you the first time you
-          open Exhume. The [README](https://github.com/davidarice/exhume#download-the-app) shows how
-          to open it anyway. `SHA256SUMS.txt` lists each file's checksum.
+          These downloads are not code-signed yet, so your computer warns you the first time you open Exhume. The [README](https://github.com/davidarice/exhume#download-the-app) shows how to open it anyway. `SHA256SUMS.txt` lists each file's checksum.
           EOF
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "Exhume $VERSION" --notes-file notes.md \
