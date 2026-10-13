@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppImage entry point: start the Exhume app bundled under usr/lib/exhume.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/exhume/exhume" "$@"

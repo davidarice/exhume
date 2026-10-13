@@ -1,0 +1,7 @@
+# Building the desktop app (packaging/exhume.spec). Running from source needs none of this:
+# `python3 run.py` uses only the standard library.
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
+# the app window on macOS and Windows; the Linux build opens the browser instead
+pywebview==6.2.1; sys_platform != "linux"
+pythonnet==3.2.1; sys_platform == "win32"

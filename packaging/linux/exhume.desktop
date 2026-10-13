@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Exhume
+Comment=Convert Final Cut Pro 7 projects to XML for DaVinci Resolve and Premiere Pro
+Exec=exhume
+Icon=exhume
+Categories=AudioVideo;Video;
+Terminal=false

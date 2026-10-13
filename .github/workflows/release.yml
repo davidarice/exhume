@@ -1,0 +1,266 @@
+# Build the Exhume desktop app for macOS, Windows and Linux and attach it to a DRAFT GitHub release
+# (publish it after checking the downloads). Runs when a version tag (vX.Y.Z) is pushed; run it by
+# hand from the Actions tab to build test downloads (workflow artifacts) without a release.
+name: Release desktop apps
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: v
+        name: Read the version (the tag must match it)
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' orchestrator/__init__.py)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match orchestrator/__init__.py ($version)"
+            exit 1
+          fi
+
+  macos:
+    needs: version
+    runs-on: macos-15
+    env:
+      # python.org's universal2 build: one app for Apple Silicon and Intel Macs
+      PY_VERSION: "3.14.8"
+      PY_PKG: python-3.14.8-macos11.pkg
+      PY_PKG_SHA256: 507fc086c5c006ff875d344a75b4e67b8fb3c401f1bc4908c6250adb673d4907
+      HAS_MAC_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Python from python.org
+        run: |
+          curl -fsSLo "$PY_PKG" "https://www.python.org/ftp/python/$PY_VERSION/$PY_PKG"
+          echo "$PY_PKG_SHA256  $PY_PKG" | shasum -a 256 -c -
+          sudo installer -pkg "$PY_PKG" -target /
+      - name: Build Exhume.app
+        env:
+          EXHUME_TARGET_ARCH: universal2
+        run: |
+          /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 -m venv .venv
+          .venv/bin/pip install --disable-pip-version-check -r packaging/requirements-desktop.txt
+          .venv/bin/pyinstaller --noconfirm packaging/exhume.spec
+      - name: Check the app
+        run: |
+          archs=$(lipo -archs dist/Exhume.app/Contents/MacOS/Exhume)
+          echo "architectures: $archs"
+          case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "::error::not universal2"; exit 1 ;; esac
+          codesign --verify --deep --strict dist/Exhume.app
+          sh packaging/check_macos_bundle.sh dist/Exhume.app
+          dist/Exhume.app/Contents/MacOS/Exhume --self-test
+      - name: Check the app window
+        continue-on-error: true
+        run: dist/Exhume.app/Contents/MacOS/Exhume --self-test-gui
+      # Signing (skipped until the Apple Developer secrets exist; untested until then):
+      # MACOS_CERT_P12 (base64 Developer ID Application .p12), MACOS_CERT_PASSWORD,
+      # MACOS_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD.
+      - name: Sign the app
+        if: env.HAS_MAC_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          codesign --force --deep --timestamp --options runtime \
+            --entitlements packaging/entitlements.plist --sign "$MACOS_SIGN_IDENTITY" dist/Exhume.app
+      - name: Make the disk image
+        run: |
+          mkdir dmg
+          ditto dist/Exhume.app dmg/Exhume.app
+          ln -s /Applications dmg/Applications
+          for attempt in 1 2 3; do
+            hdiutil create -volname Exhume -srcfolder dmg -ov -format UDZO Exhume-macOS.dmg && break
+            sleep 10
+          done
+          test -f Exhume-macOS.dmg
+      - name: Notarize the disk image
+        if: env.HAS_MAC_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit Exhume-macOS.dmg --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple Exhume-macOS.dmg
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Exhume-macOS
+          path: Exhume-macOS.dmg
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-2025
+    env:
+      HAS_WIN_SIGNING: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          architecture: x64
+      - name: Build Exhume.exe
+        run: |
+          python -m pip install --disable-pip-version-check -r packaging/requirements-desktop.txt
+          pyinstaller --noconfirm packaging/exhume.spec
+      - name: Check the app
+        run: |
+          $p = Start-Process -FilePath dist\Exhume\Exhume.exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "self-test failed (exit $($p.ExitCode))" }
+      - name: Check the app window
+        continue-on-error: true
+        run: |
+          $p = Start-Process -FilePath dist\Exhume\Exhume.exe -ArgumentList '--self-test-gui' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "window self-test failed (exit $($p.ExitCode))" }
+      # Signing (skipped until WINDOWS_CERT_PFX (base64 .pfx) and WINDOWS_CERT_PASSWORD exist;
+      # untested until then). Signs the app before it goes into the installer.
+      - name: Sign Exhume.exe
+        if: env.HAS_WIN_SIGNING == 'true'
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          & $signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD dist\Exhume\Exhume.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+      - name: Build the installer
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=$env:VERSION" packaging\exhume.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+      - name: Sign the installer
+        if: env.HAS_WIN_SIGNING == 'true'
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          & $signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /f "$env:RUNNER_TEMP\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD dist\Exhume-Windows-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+      - name: Install, check and uninstall
+        run: |
+          $p = Start-Process dist\Exhume-Windows-Setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "install failed (exit $($p.ExitCode))" }
+          $dir = "$env:LOCALAPPDATA\Programs\Exhume"
+          $p = Start-Process "$dir\Exhume.exe" -ArgumentList '--self-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installed app self-test failed (exit $($p.ExitCode))" }
+          Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          # the uninstaller hands over to a copy of itself, so wait for the app to disappear
+          for ($i = 0; $i -lt 60 -and (Test-Path "$dir\Exhume.exe"); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path "$dir\Exhume.exe") { throw "uninstall left the app behind" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Exhume-Windows
+          path: dist/Exhume-Windows-Setup.exe
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    # the oldest supported runner: the app then runs on Linux systems at least this new
+    runs-on: ubuntu-22.04
+    env:
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+      RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Build exhume
+        run: |
+          python -c "import tkinter"   # the Linux app's small control window needs Tk
+          python -m pip install --disable-pip-version-check -r packaging/requirements-desktop.txt
+          pyinstaller --noconfirm packaging/exhume.spec
+          dist/Exhume/exhume --self-test
+      - name: Make the AppImage
+        run: |
+          curl -fsSLo appimagetool "$APPIMAGETOOL_URL"
+          curl -fsSLo runtime-x86_64 "$RUNTIME_URL"
+          echo "$APPIMAGETOOL_SHA256  appimagetool" | sha256sum -c -
+          echo "$RUNTIME_SHA256  runtime-x86_64" | sha256sum -c -
+          chmod +x appimagetool
+          mkdir -p Exhume.AppDir/usr/lib
+          cp -a dist/Exhume Exhume.AppDir/usr/lib/exhume
+          cp packaging/linux/AppRun packaging/linux/exhume.desktop packaging/icons/exhume.png Exhume.AppDir/
+          chmod +x Exhume.AppDir/AppRun
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --runtime-file runtime-x86_64 \
+            Exhume.AppDir Exhume-Linux-x86_64.AppImage
+      - name: Check the AppImage
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 ./Exhume-Linux-x86_64.AppImage --self-test
+          echo "Newest glibc the app needs:"
+          find Exhume.AppDir -type f -exec sh -c 'file -b "$1" | grep -q ELF' _ {} \; -print0 \
+            | xargs -0 objdump -T 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Exhume-Linux
+          path: Exhume-Linux-x86_64.AppImage
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd assets
+          sha256sum Exhume-* > SHA256SUMS.txt
+          cat > notes.md <<'EOF'
+          ## Download
+
+          | | |
+          |---|---|
+          | **macOS** (Apple Silicon and Intel, macOS 11 or newer) | `Exhume-macOS.dmg` |
+          | **Windows** 10 and 11 (64-bit) | `Exhume-Windows-Setup.exe` |
+          | **Linux** (x86-64) | `Exhume-Linux-x86_64.AppImage` |
+
+          These downloads are not code-signed yet, so your computer warns you the first time you
+          open Exhume. The [README](https://github.com/davidarice/exhume#download-the-app) shows how
+          to open it anyway. `SHA256SUMS.txt` lists each file's checksum.
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Exhume $VERSION" --notes-file notes.md \
+            Exhume-macOS.dmg Exhume-Windows-Setup.exe Exhume-Linux-x86_64.AppImage SHA256SUMS.txt

@@ -5,4 +5,4 @@ XML (xmeml v5) that DaVinci Resolve and Adobe Premiere Pro can import. Driven by
 local web app in ../webapp; start everything with `python3 run.py`.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"

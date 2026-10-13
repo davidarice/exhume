@@ -44,7 +44,8 @@ _lock = threading.Lock()
 _jobs = {}       # job id -> {dir, path, filename, size, future, sequences, error}
 _converts = {}   # convert id -> {job, parts, error, zip}
 _tempdirs = []
-_pool = None     # shared ProcessPoolExecutor, created in main()
+_pool = None     # shared ProcessPoolExecutor, created in make_server()
+_mp_context = None   # its multiprocessing context (the desktop app always uses spawn)
 
 
 # --- worker-process functions (module-level so they pickle) -------------------
@@ -222,6 +223,26 @@ def _pool_size():
     return max(2, (os.cpu_count() or 2) // 2)
 
 
+def _exit_with_parent():
+    """Pool-worker initializer: end this worker when the process that started it is gone (a force
+    quit or crash) instead of finishing a parse nobody will collect."""
+    import multiprocessing
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+
+    def watch():
+        parent.join()          # returns once the parent process has exited
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def _new_pool():
+    return ProcessPoolExecutor(max_workers=_pool_size(), mp_context=_mp_context,
+                               initializer=_exit_with_parent)
+
+
 def _submit(fn, *args):
     """Submit to the shared pool; if a dead worker broke it (segfault/OOM),
     rebuild the executor so one poisoned job cannot brick the whole service."""
@@ -231,8 +252,22 @@ def _submit(fn, *args):
             return _pool.submit(fn, *args)
         except BrokenProcessPool:
             _pool.shutdown(wait=False, cancel_futures=True)
-            _pool = ProcessPoolExecutor(max_workers=_pool_size())
+            _pool = _new_pool()
             return _pool.submit(fn, *args)
+
+
+def _stop_pool():
+    """Stop the workers now, even mid-parse: waiting for a long parse would keep the app running
+    after its window closed."""
+    pool = _pool
+    if pool is None:
+        return
+    if hasattr(pool, "terminate_workers"):          # Python 3.14+
+        pool.terminate_workers()
+    else:
+        for proc in list((getattr(pool, "_processes", None) or {}).values()):
+            proc.terminate()
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _reap_stale_jobs():
@@ -268,6 +303,11 @@ def _cleanup_tempdirs():
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "Exhume/1.0"
+
+    def log_message(self, format, *args):
+        # the desktop app keeps requests out of its log, and a windowed build may have no stderr
+        if not getattr(self.server, "quiet", False) and sys.stderr is not None:
+            super().log_message(format, *args)
 
     def do_GET(self):
         self._safely(self._route_get)
@@ -543,27 +583,45 @@ def _default_port():
         return 8577
 
 
+def make_server(host="127.0.0.1", port=0, mp_context=None, quiet=False):
+    """Start the worker pool and the reaper, and bind the HTTP server (call serve_forever() on it).
+    Port 0 lets the OS choose a free port; the bound one is server.server_address[1]."""
+    global _pool, _mp_context
+    _mp_context = mp_context
+    _pool = _new_pool()
+    atexit.register(_cleanup_tempdirs)
+    threading.Thread(target=_reaper_loop, daemon=True).start()
+    server = ThreadingHTTPServer((host, port), Handler)
+    port = server.server_address[1]
+    server.allowed_hosts = {f"{h}:{port}" for h in ("127.0.0.1", "localhost", "[::1]", host)}
+    server.quiet = quiet
+    return server
+
+
+def shutdown_all(server):
+    """Stop a server whose serve_forever() runs on another thread, stop any conversion still
+    running, and delete the uploads and results."""
+    server.shutdown()
+    server.server_close()
+    _stop_pool()
+    _cleanup_tempdirs()
+
+
 def main():
-    global _pool
     ap = argparse.ArgumentParser(description="Exhume backend")
     ap.add_argument("--port", type=int, default=_default_port())
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
-    _pool = ProcessPoolExecutor(max_workers=_pool_size())
-    atexit.register(_cleanup_tempdirs)
-    threading.Thread(target=_reaper_loop, daemon=True).start()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.allowed_hosts = {f"{h}:{args.port}"
-                            for h in ("127.0.0.1", "localhost", "[::1]", args.host)}
-    print(f"Exhume backend on http://{args.host}:{args.port}", file=sys.stderr)
+    server = make_server(args.host, args.port)
+    print(f"Exhume backend on http://{args.host}:{server.server_address[1]}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
-        _pool.shutdown(wait=False, cancel_futures=True)
+        _stop_pool()
 
 
 if __name__ == "__main__":

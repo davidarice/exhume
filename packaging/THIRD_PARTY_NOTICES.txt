@@ -1,0 +1,28 @@
+Exhume desktop app: third-party software
+
+Exhume itself is MIT licensed (see LICENSE). The downloadable app also bundles the software
+below. Each package's own licence text ships inside the app, in its *.dist-info folder; Python's
+licence (which also covers the libraries Python is built with: OpenSSL, libffi, SQLite, zlib,
+bzip2, XZ, expat, mpdecimal, Tcl/Tk) ships as LICENSE.txt.
+
+All builds
+  Python 3.14                      PSF License                  https://www.python.org/
+  PyInstaller bootloader            GPL-2.0 with an exception    https://pyinstaller.org/
+                                    that allows bundling apps under any licence
+
+macOS and Windows builds (the app window)
+  pywebview                        BSD-3-Clause                 https://pywebview.flowrl.com/
+  bottle                           MIT                          https://bottlepy.org/
+  proxy_tools                      MIT                          https://pypi.org/project/proxy_tools/
+  typing_extensions                PSF-2.0                      https://pypi.org/project/typing-extensions/
+
+macOS build
+  PyObjC                           MIT                          https://github.com/ronaldoussoren/pyobjc
+  (Python bindings only: the app uses macOS's own system frameworks and contains no Apple code)
+
+Windows build
+  pythonnet, clr_loader            MIT                          https://github.com/pythonnet/pythonnet
+  Microsoft Edge WebView2 SDK      Microsoft WebView2 SDK       https://aka.ms/webview2
+  (redistributable files)          licence
+  Microsoft Visual C++ runtime     Microsoft redistributable    https://aka.ms/vs/redist
+  (redistributable files)          licence

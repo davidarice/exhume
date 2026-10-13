@@ -4,6 +4,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.venv-desktop/
+
+# desktop app builds (packaging/exhume.spec)
+build/
+dist/
 
 # macOS
 .DS_Store

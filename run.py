@@ -9,6 +9,7 @@ Your browser opens a local page where you drag in a .fcp project and download
 importable XML for DaVinci Resolve or Adobe Premiere Pro. Nothing is uploaded
 anywhere — there is no server and no internet connection is used.
 """
+import multiprocessing
 import os
 import socket
 import sys
@@ -18,7 +19,7 @@ import webbrowser
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-MIN_PY = (3, 8)
+MIN_PY = (3, 9)
 DEFAULT_PORT = 8577
 
 
@@ -67,4 +68,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()   # a no-op unless this script is frozen into an executable
     main()

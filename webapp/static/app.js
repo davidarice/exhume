@@ -372,11 +372,15 @@
       plural(files.length, 'XML file') + ' ready, from ' + state.filename + '.';
     el.downloadAll.textContent = files.length === 1 ? 'Download XML' : 'Download all (.zip)';
     el.downloadAll.href = '/api/download/' + state.convertId;
+    // `download` saves the file rather than showing it: the desktop app's window has no back
+    // button. Empty means "use the name the server sends".
+    el.downloadAll.download = '';
     el.doneFiles.textContent = '';
     for (const file of files) {
       const li = document.createElement('li');
       const a = document.createElement('a');
       a.href = '/api/download/' + state.convertId + '/' + file.index;
+      a.download = file.name;
       a.textContent = file.name;
       const size = document.createElement('span');
       size.className = 'file-size';
