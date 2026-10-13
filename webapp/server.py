@@ -60,14 +60,22 @@ def _tc(frames, timebase):
 
 def _sequences_of(root):
     """The browser's sequences in document order from the whole-project document: the
-    <sequence> elements under <project><children> and any <bin><children>, skipping the
-    id-only references the exporter writes for a sequence met earlier (spec §3)."""
-    out = []
+    <sequence> elements under <project><children> and any <bin><children>, each once. The
+    exporter writes a sequence in full where it first meets it and as an id-only reference after
+    that (spec §3), so a sequence nested inside an earlier one shows up in the browser as a
+    reference: its full definition is found by id."""
+    full = {el.get("id"): el for el in root.iter("sequence")
+            if el.get("id") and el.find("media") is not None}
+    out, seen = [], set()
 
     def walk(children):
         for el in children:
-            if el.tag == "sequence" and el.find("media") is not None:
-                out.append(el)
+            if el.tag == "sequence":
+                sid = el.get("id")
+                seq = el if el.find("media") is not None else full.get(sid)
+                if seq is not None and not (sid and sid in seen):
+                    seen.add(sid)
+                    out.append(seq)
             elif el.tag == "bin":
                 ch = el.find("children")
                 if ch is not None:
@@ -77,6 +85,59 @@ def _sequences_of(root):
     if ch is not None:
         walk(ch)
     return out
+
+
+def _sequence_rows(doc, project_name):
+    """The page's rows for every browser sequence, in browser order."""
+    import xml.etree.ElementTree as ET
+    from orchestrator import xmeml_emit
+    root = ET.fromstring(xmeml_emit.export_project(doc, project_name=project_name))
+    rows = [_summary(s, i) for i, s in enumerate(_sequences_of(root))]
+    # A sequence written inside an earlier one has no <uuid>, and the converter finds sequences
+    # by UUID, so take every UUID from the project itself. Its browser lists the same sequences
+    # in the same order; if they don't line up name for name, leave the rows as they are.
+    items, seen = [], set()
+    for item, _depth in xmeml_emit.browser_items(doc):
+        if doc.num(doc.get(item, "subtype")) == 20 and id(item) not in seen:
+            seen.add(id(item))
+            items.append(item)
+    if len(items) == len(rows) and all(doc.name_of(item) == row["raw_name"]
+                                       for item, row in zip(items, rows)):
+        for item, row in zip(items, rows):
+            row["uuid"] = doc.uuid(doc.get(item, "UUID")) or row["uuid"]
+    return rows
+
+
+def _summary(s, i):
+    """The plain-JSON row the page shows for one <sequence> element."""
+    rate = s.find("rate")
+    tb = int(rate.findtext("timebase") or 0) if rate is not None else 0
+    ntsc = (rate.findtext("ntsc") if rate is not None else "") == "TRUE"
+    fmt = s.find("media/video/format/samplecharacteristics")
+    items = [it for kind in ("video", "audio")
+             for tr in s.findall(f"media/{kind}/track") for it in tr]
+    dur = int(float(s.findtext("duration") or 0))
+    raw = s.findtext("name")
+    return {
+        "index": i,
+        "name": raw or f"Sequence {i + 1}",
+        "raw_name": raw,     # exact name from the binary (may be null)
+        "uuid": s.findtext("uuid"),
+        "timebase": tb,
+        "ntsc": ntsc,
+        "fps": f"{tb * 1000 / 1001:.2f}" if ntsc else str(tb),
+        "width": int(fmt.findtext("width")) if fmt is not None and fmt.findtext("width") else None,
+        "height": int(fmt.findtext("height")) if fmt is not None and fmt.findtext("height") else None,
+        "vtracks": len(s.findall("media/video/track")),
+        "atracks": len(s.findall("media/audio/track")),
+        "clips": sum(1 for it in items if it.tag == "clipitem"),
+        "transitions": sum(1 for it in items if it.tag == "transitionitem"),
+        "generators": sum(1 for it in items if it.tag == "generatoritem"),
+        "duration_frames": dur,
+        "duration_tc": _tc(dur, tb) if tb else None,
+        "start_tc": s.findtext("timecode/string"),
+        "markers": len(s.findall("marker")),
+    }
 
 
 _DOCS = {}          # per worker process: path -> (size, mtime, parsed project); at most _DOC_CACHE
@@ -102,45 +163,16 @@ def _load(path):
 
 def _scan_worker(path):
     """One full export -> small plain-JSON summary per sequence (crosses the process boundary)."""
-    import xml.etree.ElementTree as ET
-    from orchestrator import xmeml_emit
+    # loaded before the file check, so even a refused file shows the converter is installed
+    # (desktop.py --self-test relies on this)
+    from orchestrator import xmeml_emit  # noqa: F401
     # triage BEFORE the expensive parse: real KeyGrip magic (the spec reader takes
     # Intel and PowerPC-era byte orders alike)
     with open(path, "rb") as fh:
         head = fh.read(16)
     if head[:5] != b"\xa2KeyG":
         raise ValueError("This is not a Final Cut Pro project file.")
-    root = ET.fromstring(xmeml_emit.export_project(_load(path), project_name=os.path.splitext(os.path.basename(path))[0]))
-    seqs = []
-    for i, s in enumerate(_sequences_of(root)):
-        rate = s.find("rate")
-        tb = int(rate.findtext("timebase") or 0) if rate is not None else 0
-        ntsc = (rate.findtext("ntsc") if rate is not None else "") == "TRUE"
-        fmt = s.find("media/video/format/samplecharacteristics")
-        items = [it for kind in ("video", "audio")
-                 for tr in s.findall(f"media/{kind}/track") for it in tr]
-        dur = int(float(s.findtext("duration") or 0))
-        raw = s.findtext("name")
-        seqs.append({
-            "index": i,
-            "name": raw or f"Sequence {i + 1}",
-            "raw_name": raw,     # exact name from the binary (may be null)
-            "uuid": s.findtext("uuid"),
-            "timebase": tb,
-            "ntsc": ntsc,
-            "fps": f"{tb * 1000 / 1001:.2f}" if ntsc else str(tb),
-            "width": int(fmt.findtext("width")) if fmt is not None and fmt.findtext("width") else None,
-            "height": int(fmt.findtext("height")) if fmt is not None and fmt.findtext("height") else None,
-            "vtracks": len(s.findall("media/video/track")),
-            "atracks": len(s.findall("media/audio/track")),
-            "clips": sum(1 for it in items if it.tag == "clipitem"),
-            "transitions": sum(1 for it in items if it.tag == "transitionitem"),
-            "generators": sum(1 for it in items if it.tag == "generatoritem"),
-            "duration_frames": dur,
-            "duration_tc": _tc(dur, tb) if tb else None,
-            "start_tc": s.findtext("timecode/string"),
-            "markers": len(s.findall("marker")),
-        })
+    seqs = _sequence_rows(_load(path), os.path.splitext(os.path.basename(path))[0])
     if not seqs:
         raise ValueError("no sequences found in this project")
     return seqs

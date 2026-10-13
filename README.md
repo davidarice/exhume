@@ -1,11 +1,11 @@
 # Exhume
 
-**Version 2.1.0**
+**Version 2.1.1** · [what's new](CHANGELOG.md)
 
-New in 2.1.0: Exhume is now a **downloadable app** for macOS, Windows and Linux. No Python, no
-Terminal: download it, open it, drag in your project. (Since 2.0.0 the XML is produced the way
-Final Cut Pro 7 itself writes it: on the projects used to check it, the output is identical to
-Final Cut's own XML export.)
+Exhume is now a **downloadable app** for macOS, Windows and Linux. No Python, no Terminal:
+download it, open it, drag in your project. (Since 2.0.0 the XML is produced the way Final Cut
+Pro 7 itself writes it: on the projects used to check it, the output is identical to Final
+Cut's own XML export.)
 
 **Open old Final Cut Pro 7 projects in modern editing software.**
 
