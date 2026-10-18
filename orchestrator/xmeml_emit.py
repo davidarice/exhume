@@ -21,7 +21,6 @@ import re
 import struct
 import sys
 
-from . import keyg_grouper as G
 from . import keyg_specdoc
 
 # ---------------------------------------------------------------------------------------------
@@ -373,7 +372,7 @@ HASH, ARRAY, STRUCT = 0, 1, 2              # dictionary body styles (dictionary-
 
 class Doc:
     """Typed access to a SpecDoc tree: type codes, back-references resolved to the shared object,
-    entries in insertion (file) order without the notifier entries keyg_specdoc lifts for the walker."""
+    entries in insertion (file) order without the notifier entries keyg_specdoc lifts onto their owner."""
 
     def __init__(self, sd):
         self.sd = sd
@@ -1663,7 +1662,7 @@ def _converted_speed_duration(tr, cs, d):
     outd = _old_speed_output(tr.doc, d)
     dur = cs.slots.get("duration")
     if outd is not None and dur is not None and not isinstance(dur, list) and tr.doc.num(dur) != outd:
-        n = G.Node(-2, dur.off, "F64", "value")
+        n = keyg_specdoc.Node(-2, dur.off, "F64", "value")
         n.payload = n.value = outd
         cs.slots["duration"] = n
 
@@ -2390,7 +2389,7 @@ CODE_FN["project_name"] = c_project_name
 
 
 def load(path):
-    """The spec reader's document for a project file (never the walker)."""
+    """The spec reader's document for a project file."""
     sd = keyg_specdoc.SpecDoc(path)
     if sd.reader_error is not None:
         raise ExportError("spec reader: %s" % sd.reader_error)

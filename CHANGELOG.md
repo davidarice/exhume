@@ -1,5 +1,9 @@
 # What's new in Exhume
 
+## 2.1.2 — 2026-10-17
+
+- **Leaner app, same results.** The old project reader and XML writer, unused since 2.0.0, are removed. Conversions are identical to 2.1.1's, byte for byte, on every test project.
+
 ## 2.1.1 — 2026-10-13
 
 - **Every sequence is listed.** A sequence nested inside an earlier sequence used to be left out of the list (one test project showed 46 of its 55 sequences). It now appears and converts like any other.
