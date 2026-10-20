@@ -6,4 +6,4 @@ stream, keyg_specdoc builds the document tree and xmeml_emit writes the XML, all
 specification in spec/.
 """
 
-__version__ = "2.1.2"
+__version__ = "2.1.3"

@@ -1,6 +1,6 @@
 # Exhume
 
-**Version 2.1.2** · [what's new](CHANGELOG.md)
+**Version 2.1.3** · [what's new](CHANGELOG.md)
 
 Exhume is now a **downloadable app** for macOS, Windows and Linux. No Python, no Terminal:
 download it, open it, drag in your project. (Since 2.0.0 the XML is produced the way Final Cut

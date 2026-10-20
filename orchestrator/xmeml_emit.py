@@ -546,9 +546,11 @@ TIMING = [VAL("name", xtype=STRING), VAL("duration", xtype=DOUBLE), EL("rate"), 
 # by every item (the items of a nested sequence take them from the nesting clip item: RESP 535,
 # NoMansLand); labelComment is local to media clip items, generators and transitions but inherited
 # by clips and nested-sequence items (a clip well's clip, SSTIKI); labelColor is local to all.
+# masterClips' master and subclipMaster are not local (spec §5.11): an item without its own takes
+# the enclosing scope's.
 NEST_LOCAL = ("name", "duration", "in", "out", "start", "end", "subframeoffset", "sourceType",
               "inoffset", "outoffset", "stillFrameOffset", "stillGamma", "enable", "alphatype",
-              "keytype", "sync", "fieldDom", "mediaDelay", "master", "subclipMaster",
+              "keytype", "sync", "fieldDom", "mediaDelay",
               "marker", "filter", "timecode", "pAspectRatio", "volume", "pan", "rate",
               "effect", "clip", "angle", "layerIndex", "channelIndex", "mode",
               "label", "scene", "take", "lognote", "good", "labelColor",
@@ -623,8 +625,11 @@ RULES = [
     Rule("audioformat", "E", None, name="format", slot="audioformat", omit=True, children=[EL("asamplechar")]),
     Rule("asamplechar", "E", None, name="samplecharacteristics", create=True, omit=True, children=[
         VAL("audioDepth", "depth", INTEGER), VAL("sampleRate", "samplerate", INTEGER)]),
+    # spec §5.4: `name` is not a local name of the codec, so a codec that stores none (the Motion
+    # project clips of El Manuscrito: cType OZML, vendor appl only) writes, as <name> and as
+    # <codecname>, the name in scope: for a clip's codec the clip's own
     Rule("codec", "E", "codec", path=("final",), vtype="dict", name="codec",
-         local=("name", "typeName", "cType", "vendor"),
+         local=("typeName", "cType", "vendor"),
          children=[VAL("name"), EL("qtappdata")]),
     Rule("qtappdata", "E", None, name="appspecificdata", create=True, children=[
         LIT("appname", "Final Cut Pro"), LIT("appmanufacturer", "Apple Inc."), LIT("appversion", "7.0"),
@@ -822,10 +827,11 @@ RULES = [
          children=[VAL("enabled", xtype=BOOLEAN), EL("e_dropshadow")]),
     Rule("m_motionblur", "E", "motionblur", path=("motion",), vtype="dict", name="filter", slot="filter",
          local=("parameter", "enabled"), children=[VAL("enabled", xtype=BOOLEAN), EL("e_motionblur")]),
-    # spec §6: the template maps motion/timeremap to a Time Remap filter.  oracle-observed, spec gap:
-    # only nested-sequence items keep such a dictionary (FCP 7 converts a media item's on loading);
-    # the filter lists variablespeed, mappedduration, speed, reverse and frameblending in key order,
-    # with valuemin/valuemax and, for the timecode only, a value
+    # spec §6: the template maps motion/timeremap to a Time Remap filter, on nested-sequence items
+    # only: a media item's, stored by projects older than the FCP 7 format, gives none (nor does an
+    # audio item's own `timeremap`, which no rule selects).  oracle-observed, spec gap: the filter
+    # lists variablespeed, mappedduration, speed, reverse and frameblending in key order, with
+    # valuemin/valuemax and, for the timecode only, a value
     Rule("m_timeremap", "E", "timeremap", path=("motion",), vtype="dict", name="filter", slot="filter",
          omit=True, children=[CODE("motion_timeremap")]),
 ] + [
@@ -983,7 +989,10 @@ class Translator:
         for k, rs in self.by_key.items():
             rs.sort(key=lambda r: (order[r.kind], not r.path, not r.conds))
         self.masters = None
+        self.browser_ids = None      # id() of every Browser item (older projects' master clips, spec §5.11)
+        self.numbered_masters = None  # number -> Browser clip, for masters stored as numbers
         self.master_refs = []        # master clips named by <masterclipid>/<subclipmasterid>, first-mention order
+        self.top_children = None     # the project's own children array, walked in top_level_order (spec §5.1)
 
     # -- rule selection (spec §2.3) ----------------------------------------------------------
     def _type_ok(self, r, v):
@@ -1030,7 +1039,10 @@ class Translator:
         if st == STRUCT:
             return
         if st == ARRAY:
-            for i, el in enumerate(D.elements(d)):
+            els = D.elements(d)
+            if d is self.top_children:
+                els = top_level_order(D, els)
+            for i, el in enumerate(els):
                 v = D.deref(el)
                 if v is None:
                     continue
@@ -1114,7 +1126,7 @@ class Translator:
         if v is not None and self.doc.is_dict(v):
             self.translate(v, cs)
             if r.media is not None:
-                _converted_speed_duration(self, cs, v)
+                _converted_speed_timing(self, cs, v)
         self.write_children(r, cs, x, v)
         if r.omit and x.empty():
             return None
@@ -1203,8 +1215,7 @@ def _assign_master_ids(tr, cs, v):
         return
     for k, node in D.entries(v):
         if k in ("master", "subclipMaster"):
-            u = D.uuid(D.deref(node))
-            m = master_clip(tr, u) if u else None
+            m = designated_master(tr, D.deref(node))
             if m is not None:
                 tr.ids.assign(m, tr.base(m))
 
@@ -1254,15 +1265,15 @@ def c_if_transition(tr, cs, x, d, spec):
 
 
 def c_masterclipid(tr, cs, x, d):
-    """<masterclipid>, <subclipmasterid> (spec §5.11): the export id of the project's master clip
-    whose UUID the item's masterClips/master (subclipMaster) names, assigned now if new.  Nothing is
-    named when the item's masterClips carries the `orphan` key (its master clip was deleted; FCP's
-    own exports leave <masterclipid> out — Living_prayer_1 " FINAL_CHRISTIANITY VF+subs")."""
+    """<masterclipid>, <subclipmasterid> (spec §5.11): the export id of the master clip the
+    masterClips/master (subclipMaster) in scope designates (designated_master), assigned now if new.
+    Nothing is named when the item's own masterClips carries the `orphan` key (its master clip was
+    deleted; FCP's own exports leave <masterclipid> out — Living_prayer_1 " FINAL_CHRISTIANITY
+    VF+subs")."""
     if _orphan_master(tr, cs, d):
         return
     for key, name in (("master", "masterclipid"), ("subclipMaster", "subclipmasterid")):
-        u = tr.doc.uuid(cs.get(key))
-        m = master_clip(tr, u) if u else None
+        m = designated_master(tr, cs.get(key))
         if m is not None:
             x.add(X(name, tr.ids.assign(m, tr.base(m))))
             if m not in tr.master_refs:
@@ -1507,10 +1518,13 @@ def c_qteffect(tr, cs, x, d):
 
 
 def c_marker_color(tr, cs, x, d):
-    """<color> <- color (RGBA).  oracle-observed, spec gap: in a project saved by an older application
-    (stream version below 222) a marker without a colour gets the colour FCP 7 gives such markers on
-    loading: green (0, 48, 191, 72) for a sequence's markers and a nested-sequence item's, red
-    (0, 255, 0, 0) for the others; FCP 7 projects keep colourless markers colourless."""
+    """<color> <- color (RGBA, spec §5.9).  A project older than the FCP 7 format (stream version
+    below 222) stores markers without a colour and FCP 7's loader gives them one: green
+    (0, 48, 191, 72) for the markers of a Browser sequence and of a nested-sequence item whose
+    nested sequence is a Browser item, red (0, 255, 0, 0) for those of other items; the markers of
+    a sequence that is not a Browser item (a copy only a nested-sequence item holds) and of a
+    nested-sequence item whose nested sequence is not a Browser item get none, so no <color> is
+    written.  FCP 7 projects keep colourless markers colourless."""
     node = cs.get("color")
     if node is not None and not isinstance(node, list):
         e = tr.leaf("color", node, RGBA)
@@ -1524,8 +1538,23 @@ def c_marker_color(tr, cs, x, d):
     while s is not None and (s.rule is None or s.rule.kind != "E"):
         s = s.parent
     owner = s.dict if s is not None else None
-    seq = D.num(D.get(owner, "subtype")) == 20 or D.num(D.get(owner, "type")) == 2
-    x.add(leaf_element("color", RGBA, T_RGBA, b"\x00\x30\xbf\x48" if seq else b"\x00\xff\x00\x00"))
+    if D.num(D.get(owner, "subtype")) == 20:
+        sequence = owner
+    elif D.num(D.get(owner, "type")) == 2:
+        sequence = D.get(owner, "clip")          # the nested sequence
+    else:
+        x.add(leaf_element("color", RGBA, T_RGBA, b"\x00\xff\x00\x00"))
+        return
+    if _in_browser(tr, sequence):
+        x.add(leaf_element("color", RGBA, T_RGBA, b"\x00\x30\xbf\x48"))
+
+
+def _in_browser(tr, d):
+    """True when dictionary d is a Browser item: an element of the project's or a bin's children
+    array (browser_items)."""
+    if tr.browser_ids is None:
+        tr.browser_ids = {id(e) for e, _ in browser_items(tr.doc)}
+    return d is not None and id(d) in tr.browser_ids
 
 
 def c_privatestate(tr, cs, x, d):
@@ -1561,7 +1590,7 @@ def c_timeremap(tr, cs, x, d):
     speed is variable, reversed or other than 100 %."""
     if d is None:
         return
-    sp = _speed_model(tr, d)
+    sp = _speed_model(tr, d, _media_of(cs))
     if sp is None:
         return
     segs = sp["segs"]
@@ -1588,13 +1617,17 @@ def _payload_obj(tr, v):
     return None
 
 
-def _speed_model(tr, d):
+def _speed_model(tr, d, kind=None):
     """The item's speed as segments (spec §6 Time Remap).  New-style items carry an FCSpeedData
     object in speedDataWrapper/speedData (input duration, flags and bezier handles, then one
     FCSpeedSegment per segment: inputFirst, inputUsed, outputDuration, anchorOffset, reverse); older
-    items a `speed` factor, which FCP 7 converts on loading (oracle-observed, spec gap: the media
-    duration stands for the input, the item's duration for the output, `ratefx` for frame blending;
-    an approximation, the conversion also moves some items' timing by a frame)."""
+    items a `speed` factor, which FCP 7 converts on loading.  The one case known exactly (spec §6
+    Pre-FCP 7 speeds, see _old_reverse_duration; `kind` is the item's media kind) becomes a speed
+    of input duration D with one reversed segment whose input used and output duration are both
+    D - 1, frame blending when `ratefx` is non-zero, on an item whose in and out are written a
+    frame lower (`lower`; spec §5.6, see _converted_speed_timing).  Other older speeds:
+    oracle-observed, spec gap: the media duration stands for the input, the item's duration for
+    the output, `ratefx` for frame blending; an approximation (spec §6: only approximately known)."""
     D = tr.doc
     sdw = D.get(d, "speedDataWrapper")
     sd = D.get(sdw, "speedData") if sdw is not None else None
@@ -1625,6 +1658,12 @@ def _speed_model(tr, d):
     speed = D.num(D.get(d, "speed"))
     if speed is None:
         return None
+    n = _old_reverse_duration(D, d, kind)
+    if n is not None:
+        return {"in_dur": n, "segs": [{"first": None, "used": n - 1.0, "outd": n - 1.0, "anchor": None,
+                                       "reverse": True}],
+                "reverse": True, "blend": bool(D.num(D.get(d, "ratefx"))), "variable": False,
+                "inbez": None, "outbez": None, "factor": None, "lower": 1}
     f = D.get(d, "file")
     media = D.num(D.get(f, "duration")) if f is not None else None
     outd = _old_speed_output(D, d) or D.num(D.get(d, "duration"))
@@ -1637,6 +1676,42 @@ def _speed_model(tr, d):
                                        "reverse": rev}],
             "reverse": rev, "blend": bool(D.num(D.get(d, "ratefx"))),
             "variable": bool(D.num(D.get(d, "variablespeed"))), "inbez": None, "outbez": None, "factor": speed}
+
+
+def _old_reverse_duration(D, d, kind):
+    """spec §6 (Pre-FCP 7 speeds), the one case known exactly: the stored `duration` D of a media
+    clip item (`type` 1) in the older form (no speedDataWrapper) with `reverse` set, `speed` 1,
+    `variablespeed` 0 and 0 < `in` < `out` < D, whose stored graph (the `graphdict` of
+    motion/timeremap on a video item, of the item's own `timeremap` on an audio item, after `kind`)
+    has exactly the keyframes (when, value) (0, D), (in, D - in), (out, D - out), (D, 0); None for
+    any other item.  Graph values are single precision.  The stored dictionary's own reverse and
+    frameblending parameters are not read (spec: 0 and 1 whatever FCP writes)."""
+    if D.get(d, "speedDataWrapper") is not None or D.num(D.get(d, "type")) != 1:
+        return None
+    if (not D.num(D.get(d, "reverse")) or D.num(D.get(d, "speed")) != 1
+            or D.num(D.get(d, "variablespeed")) != 0):
+        return None
+    n, i_in, i_out = (D.num(D.get(d, k)) for k in ("duration", "in", "out"))
+    if n is None or i_in is None or i_out is None or not 0 < i_in < i_out < n:
+        return None
+    if kind == "video":
+        graph = D.path(d, "motion", "timeremap", "graphdict")
+    elif kind == "audio":
+        graph = D.path(d, "timeremap", "graphdict")
+    else:
+        return None
+    kfs = D.get(graph, "keyframe") if graph is not None and D.is_dict(graph) else None
+    if kfs is None or not D.is_dict(kfs):
+        return None
+    got = [D.deref(e) for e in D.elements(kfs)]
+    want = ((0, n), (i_in, n - i_in), (i_out, n - i_out), (n, 0))
+    if len(got) != len(want):
+        return None
+    for k, (when, value) in zip(got, want):
+        w, v = D.num(D.get(k, "when")), D.num(D.get(k, "value"))
+        if w is None or v is None or w != when or _f32(v) != _f32(value):
+            return None
+    return n
 
 
 def _old_speed_output(D, d):
@@ -1657,14 +1732,30 @@ def _old_speed_output(D, d):
     return float(max(round(comp), out if out is not None else 0))
 
 
-def _converted_speed_duration(tr, cs, d):
-    """Park the converted duration of a pre-FCP 7 speed (see _old_speed_output) for <duration>."""
-    outd = _old_speed_output(tr.doc, d)
+def _converted_speed_timing(tr, cs, d):
+    """Park the timing FCP 7 gives a pre-FCP 7 speed on loading for <duration>, <in> and <out>: the
+    reversed speed of 100 % known exactly (spec §5.6, §6; see _old_reverse_duration) writes all
+    three one frame lower than stored, <start> and <end> as stored; another constant speed its
+    converted duration (see _old_speed_output)."""
+    D = tr.doc
+    if _old_reverse_duration(D, d, _media_of(cs)) is not None:
+        for key in ("duration", "in", "out"):
+            _park_number(cs, key, D.num(D.get(d, key)) - 1)
+        return
+    outd = _old_speed_output(D, d)
     dur = cs.slots.get("duration")
-    if outd is not None and dur is not None and not isinstance(dur, list) and tr.doc.num(dur) != outd:
-        n = keyg_specdoc.Node(-2, dur.off, "F64", "value")
-        n.payload = n.value = outd
-        cs.slots["duration"] = n
+    if outd is not None and dur is not None and not isinstance(dur, list) and D.num(dur) != outd:
+        _park_number(cs, "duration", outd)
+
+
+def _park_number(cs, key, value):
+    """Park a computed number for `key` in place of the parked stored value (same file offset)."""
+    old = cs.slots.get(key)
+    if old is None or isinstance(old, list):
+        return
+    n = keyg_specdoc.Node(-2, old.off, "F64", "value")
+    n.payload = n.value = float(value)
+    cs.slots[key] = n
 
 
 def _tr_param(pid, vmin=None, vmax=None, value=None):
@@ -1699,7 +1790,8 @@ def _timeremap_filter(tr, cs, d, sp):
     outputDuration, valued inputFirst + inputUsed + anchorOffset).  Within a segment the input is
     inputFirst + (t - B) * rate + anchorOffset, in double precision on the float32 rate; a reversed
     single segment runs inputUsed - t * rate + anchorOffset, its start at inputUsed + 1 and its end
-    at 1.  Values are written as float32."""
+    at 1.  Values are written as float32.  The in and out points are the item's as written: the
+    model's `lower` frames below the stored ones (spec §6, a converted pre-FCP 7 reversed speed)."""
     D = tr.doc
     media = _media_of(cs) or "video"
     f = X("filter")
@@ -1729,10 +1821,11 @@ def _timeremap_filter(tr, cs, d, sp):
             firsts.append(0.0)
         else:
             firsts.append(firsts[-1] + segs[k - 1]["used"] - 1)
+    lower = sp.get("lower", 0)
     i_in = D.num(D.get(d, "in"))
     i_out = D.num(D.get(d, "out"))
-    i_in = 0.0 if i_in is None or i_in < 0 else float(i_in)
-    i_out = end_t if i_out is None or i_out < 0 else float(i_out)
+    i_in = 0.0 if i_in is None or i_in < 0 else float(i_in) - lower
+    i_out = end_t if i_out is None or i_out < 0 else float(i_out) - lower
 
     def seg_at(t):
         k = 0
@@ -2276,18 +2369,22 @@ def _file_timecodes(tr, f, fx):
 def file_element(tr, f, item_name=None):
     """<file> for a file record (spec §7): name, pathurl (case b; generator media: mediaSource), rate,
     duration, a still's width and height, metadata, timecodes and media, in that order; a record
-    written before is `<file id="..."/>` (spec §3)."""
+    written before is `<file id="..."/>` (spec §3).  A record without path elements has no <name>
+    from a path and no <pathurl>: it is generator media when its file info has specType 6 (spec §7,
+    H: the property FCP tests), named after the generator and given a <mediaSource>; any other is
+    written as missing media, without <name>, <pathurl> or <mediaSource>, its id from the reader
+    (`QTMRead`, `QTMRead1`, ...)."""
     D = tr.doc
     if f in tr.ids.written:
         return X("file", id=tr.ids.get(f))
     rec = _filespec(f)
     els = record_elements(rec) if rec is not None else []
-    generated = not els and not (rec or {}).get("vol")
+    generated = not els and D.num(D.get(f, "specType")) == 6
     fname = to_text(els[-1]) if els else None
     if generated:
-        # oracle-observed, spec gap: generator media (a record without volume or path) is named by
-        # the application's generator name for its reader, known here for the generators the corpus
-        # uses; otherwise the item's name stands in
+        # spec §7 item 2: generator media is named after its generator, known here by reader for
+        # the three the corpus uses (GENERATOR_NAMES); spec gap: for another reader (not observed)
+        # the item's name stands in
         reader = D.text(D.get(f, "reader"))
         fname = GENERATOR_NAMES.get(reader) or (to_text(item_name) if item_name else None)
     base = file_id_base(fname) if fname else D.raw_text(D.get(f, "reader"))
@@ -2334,7 +2431,9 @@ GENERATOR_NAMES = {"Slug": "Slug", "BarsAndTone": "Bars and Tone (NTSC)",
 
 
 def master_clip(tr, u):
-    """The master clip dictionary with UUID u, from the project's masterClips/masterClipsTable."""
+    """The master clip dictionary with UUID u, from the project's masterClips/masterClipsTable: the
+    one the first entry for u holds, or None when that entry is an orphan entry (its master clip
+    was deleted and the entry holds the orphaned clip item instead, spec §5.11)."""
     if tr.masters is None:
         tr.masters = {}
         D = tr.doc
@@ -2344,9 +2443,76 @@ def master_clip(tr, u):
                 e = D.deref(e)
                 uid = D.uuid(D.get(e, "uniqueID"))
                 mc = D.get(e, "masterClips")
-                if uid and mc is not None and D.is_dict(mc):
-                    tr.masters.setdefault(uid, mc)
+                if uid and mc is not None and D.is_dict(mc) and uid not in tr.masters:
+                    tr.masters[uid] = None if D.get(e, "orphan") is not None else mc
     return tr.masters.get(u)
+
+
+def designated_master(tr, node):
+    """The master clip a masterClips/master (subclipMaster) value designates (spec §5.11), or None.
+    A UUID designates the master-clip table's master clip (master_clip); in a project saved by an
+    application older than FCP 7 (stream version below 222) only if that clip is a Browser item.
+    In such a project a number designates a master through the number-keyed table
+    (numbered_masters)."""
+    D = tr.doc
+    if node is None or isinstance(node, list):
+        return None
+    older = (D.sd.stream_version or 0) < 222
+    u = D.uuid(node)
+    if u:
+        m = master_clip(tr, u)
+        if m is not None and older and not _in_browser(tr, m):
+            return None
+        return m
+    n = D.num(node)
+    if n is None or not older:
+        return None
+    if tr.numbered_masters is None:
+        tr.numbered_masters = numbered_masters(D)
+    return tr.numbered_masters.get(n)
+
+
+def numbered_masters(D):
+    """number -> master clip, for a project whose masterClips/master values are numbers (spec §5.11):
+    the master clip of the master-clip table's first entry for the number, if that entry is not an
+    orphan entry and the clip is a Browser item; else the master clip of the first entry whose
+    minions list, as clipPtr, the Browser clip (subtype 4 or 5) holding the number (an affiliate
+    copy of that master); else that Browser clip itself."""
+    browser = browser_items(D)
+    in_browser = {id(e) for e, _ in browser}
+    entry_master, minion_of = {}, {}
+    table = D.path(D.sd.root, "masterClips", "masterClipsTable")
+    if table is not None and D.is_dict(table):
+        for e in D.elements(table):
+            e = D.deref(e)
+            n = D.num(D.get(e, "uniqueID"))
+            if n is None:
+                continue
+            if n not in entry_master:
+                mc = D.get(e, "masterClips")
+                orphan = D.get(e, "orphan") is not None
+                entry_master[n] = mc if mc is not None and D.is_dict(mc) and not orphan else None
+            minions = D.get(e, "minions")
+            if minions is not None and D.is_dict(minions):
+                for m in D.elements(minions):
+                    clip = D.get(D.deref(m), "clipPtr")
+                    if clip is not None:
+                        minion_of.setdefault(id(clip), n)
+    out = {}
+    for e, _ in browser:
+        if D.num(D.get(e, "subtype")) not in (4, 5):
+            continue
+        k = D.num(D.path(e, "masterClips", "master"))
+        if k is None or k in out:
+            continue
+        m = entry_master.get(k)
+        if m is None or id(m) not in in_browser:
+            owner = minion_of.get(id(e))
+            m = entry_master.get(owner) if owner is not None else None
+            if m is None or id(m) not in in_browser:
+                m = e
+        out[k] = m
+    return out
 
 
 def resolve_spec(tr, ctx, mt, ti, ci):
@@ -2404,19 +2570,43 @@ def project_element(doc, project_name=None, **kw):
     root = doc.sd.root
     if doc.num(doc.get(root, "subtype")) != 3:
         raise ExportError("the root item is not a project")
+    tr.top_children = doc.get(root, "children")
     top = Scope(None, None, None)
     if project_name is not None:
         top.slots["#project_name"] = project_name
     return tr.build(PROJECT, None, root, top, on_spot=True)
 
 
+def top_level_order(doc, elements):
+    """The elements of the project's own children array in the order the whole-project export
+    writes them (spec §5.1 Top-level order): the items of each group whose names are equal ignoring
+    case (upper-cased) fill the group's positions in the order the file first defines them, an
+    element stored as an object reference counting where the dictionary it names was serialised;
+    every other item keeps its index position.  A bin's children array is not reordered."""
+    els = list(elements)
+    groups = {}
+    for i, el in enumerate(els):
+        v = doc.deref(el)
+        name = doc.name_of(v) if v is not None and doc.is_dict(v) else None
+        if name is not None:
+            groups.setdefault(name.upper(), []).append(i)
+    out = list(els)
+    for positions in groups.values():
+        if len(positions) > 1:
+            defined = sorted(positions, key=lambda i: doc.deref(els[i]).off)     # stable: ties keep index order
+            for pos, i in zip(positions, defined):
+                out[pos] = els[i]
+    return out
+
+
 def browser_items(doc):
     """Every browser item in document order: (dictionary, depth) through the project's and bins'
-    children arrays."""
+    children arrays, the project's own in the whole-project export's order (top_level_order), so a
+    listing made from these items follows that export."""
     out = []
 
-    def walk(arr, depth):
-        for e in doc.elements(arr):
+    def walk(els, depth):
+        for e in els:
             e = doc.deref(e)
             if e is None or not doc.is_dict(e):
                 continue
@@ -2424,11 +2614,11 @@ def browser_items(doc):
             if doc.num(doc.get(e, "subtype")) == 3:
                 ch = doc.get(e, "children")
                 if ch is not None and doc.is_dict(ch):
-                    walk(ch, depth + 1)
+                    walk(doc.elements(ch), depth + 1)
 
     ch = doc.get(doc.sd.root, "children")
     if ch is not None:
-        walk(ch, 0)
+        walk(top_level_order(doc, doc.elements(ch)), 0)
     return out
 
 
@@ -2468,11 +2658,18 @@ def item_elements(doc, item, **kw):
         ch = b.add(X("children"))
         bscope = Scope(top, 1, b, straight=True)
         cscope = Scope(bscope, "children", ch, straight=True)
-        for i, m in enumerate(masters):
+        i, seen = 0, len(tr.master_refs)
+        while i < len(masters):
+            m = masters[i]
             rc = tr.select(ELEM, m, cscope)
-            if rc is None or rc == "V":
-                continue
-            tr.build(rc, i, m, cscope, idx=i)
+            if rc is not None and rc != "V":
+                tr.build(rc, i, m, cscope, idx=i)
+            i += 1
+            # a clip written into the bin may name a master of its own, which the bin must hold too
+            for extra in tr.master_refs[seen:]:
+                if extra is not item and extra not in masters:
+                    masters.append(extra)
+            seen = len(tr.master_refs)
         top.x.add(b)
     return top.x.children
 

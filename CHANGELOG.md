@@ -1,5 +1,11 @@
 # What's new in Exhume
 
+## 2.1.3 — 2026-10-19
+
+- **Sequences that use deleted master clips import into Final Cut Pro 7.** Some sequences named master clips the converted file didn't contain, and Final Cut Pro refused to import them.
+- **Projects saved by Final Cut Pro 6 and earlier come out closer to Final Cut Pro 7's own export:** links to master clips, reversed clips one frame shorter as Final Cut Pro 7 makes them, marker colours, and the order of a sequence and a bin with the same name.
+- Clips whose media file has no location are written as missing media, as Final Cut Pro writes them, and Motion project clips keep their codec name.
+
 ## 2.1.2 — 2026-10-17
 
 - **Leaner app, same results.** The old project reader and XML writer, unused since 2.0.0, are removed. Conversions are identical to 2.1.1's, byte for byte, on every test project.
